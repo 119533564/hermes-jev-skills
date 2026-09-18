@@ -152,6 +152,26 @@ class KeystoreTests(unittest.TestCase):
 
 
 class KeySetupTests(unittest.TestCase):
+    """Patches are applied on the main thread and always undone, so a failure here cannot leak into other tests."""
+
+    def start(self, timeout):
+        self.announced = []
+        self.box = {}
+        stderr = mock.Mock(write=lambda text: self.announced.append(text), flush=lambda: None)
+        patcher = mock.patch.object(key_setup.sys, "stderr", stderr)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        thread = threading.Thread(
+            target=lambda: self.box.update(result=key_setup.run_browser(open_browser=False, verify=False, timeout=timeout)))
+        thread.start()
+        self.addCleanup(thread.join, 30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any("url" in line for line in self.announced):
+            time.sleep(0.05)
+        line = next((line for line in self.announced if "url" in line), None)
+        self.assertIsNotNone(line, "the key page never announced its URL")
+        return thread, json.loads(line)["url"]
+
     def test_page_stores_key_and_output_never_contains_it(self):
         stored = {}
 
@@ -159,57 +179,30 @@ class KeySetupTests(unittest.TestCase):
             stored["value"] = value
             return {"stored_in": ["test"], "hermes_env_files": 0, "length": len(value)}
 
-        result_box = {}
-        announced = []
+        patcher = mock.patch.object(keystore, "store", fake_store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        thread, url = self.start(timeout=30)
 
-        def run():
-            with mock.patch.object(keystore, "store", fake_store), \
-                 mock.patch.object(key_setup.sys, "stderr", mock.Mock(write=lambda text: announced.append(text), flush=lambda: None)):
-                result_box["result"] = key_setup.run_browser(open_browser=False, verify=False, timeout=10)
-
-        thread = threading.Thread(target=run)
-        thread.start()
-        for _ in range(100):
-            if any("url" in line for line in announced):
-                break
-            time.sleep(0.05)
-        url = json.loads(next(line for line in announced if "url" in line))["url"]
-
-        wrong = url.rsplit("/", 1)[0] + "/not-the-token"
         with self.assertRaises(urllib.error.HTTPError):
-            urllib.request.urlopen(wrong, timeout=5)
-
-        page = urllib.request.urlopen(url, timeout=5).read().decode()
+            urllib.request.urlopen(url.rsplit("/", 1)[0] + "/not-the-token", timeout=10)
+        page = urllib.request.urlopen(url, timeout=10).read().decode()
         self.assertIn('type="password"', page)
         body = urllib.parse.urlencode({"key": KEY}).encode()
-        done = urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=5).read().decode()
+        done = urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=10).read().decode()
         self.assertIn("Jev is connected", done)
-        thread.join(5)
+        thread.join(30)
 
         self.assertEqual(stored["value"], KEY)
-        self.assertEqual(result_box["result"]["status"], "stored")
-        self.assertNotIn(KEY, json.dumps(result_box["result"]) + "".join(announced) + done)
+        self.assertEqual(self.box["result"]["status"], "stored")
+        self.assertNotIn(KEY, json.dumps(self.box["result"]) + "".join(self.announced) + done)
 
     def test_rebinding_host_header_is_refused(self):
-        announced = []
-        box = {}
-
-        def run():
-            with mock.patch.object(key_setup.sys, "stderr", mock.Mock(write=lambda text: announced.append(text), flush=lambda: None)):
-                box["r"] = key_setup.run_browser(open_browser=False, verify=False, timeout=1.5)
-
-        thread = threading.Thread(target=run)
-        thread.start()
-        for _ in range(100):
-            if any("url" in line for line in announced):
-                break
-            time.sleep(0.05)
-        url = json.loads(next(line for line in announced if "url" in line))["url"]
-        request = urllib.request.Request(url, headers={"Host": "evil.example:80"})
+        thread, url = self.start(timeout=3)
         with self.assertRaises(urllib.error.HTTPError):
-            urllib.request.urlopen(request, timeout=5)
-        thread.join(5)
-        self.assertEqual(box["r"]["status"], "timed_out")
+            urllib.request.urlopen(urllib.request.Request(url, headers={"Host": "evil.example:80"}), timeout=10)
+        thread.join(30)
+        self.assertEqual(self.box["result"]["status"], "timed_out")
 
 
 ROWS = [

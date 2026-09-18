@@ -135,7 +135,15 @@ def run_browser(
             outcome.update(result)
             done.set()
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    class Server(ThreadingHTTPServer):
+        def server_bind(self) -> None:
+            # HTTPServer.server_bind resolves the machine's FQDN, a reverse-DNS lookup that can
+            # stall for many seconds on some Macs. The name is never used here, so skip it.
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = str(self.server_address[0]), int(self.server_address[1])
+
+    server = Server((host, port), Handler)
     server.daemon_threads = True
     shown_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = f"http://{shown_host}:{server.server_address[1]}/{token}"
