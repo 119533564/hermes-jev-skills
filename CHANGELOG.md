@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (2026-09-18)
+
+- Plugin manifest: `config_schema` in the flat shape Hermes expects (it logged a warning and skipped the old one).
+- Key page: no reverse-DNS lookup on bind (stalled for seconds on some Macs).
+- Shared `routing.json` / `state.json` in the Hermes root are the default for every profile; `/jev <switch> <value> all`.
+
 ## 0.1.0 (2026-09-18)
 
 First release.

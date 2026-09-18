@@ -1,5 +1,5 @@
 name: hermes-jev
-version: 0.1.0
+version: 0.1.1
 description: TypeSafe Jev takes the cheap decisions - model routing, skill selection, memory filtering, compaction selection, GUI and browser action choice.
 author: Steve Darlow
 license: MIT
@@ -16,8 +16,6 @@ provides_hooks:
   - transform_llm_output
 tags: [jev, typesafe, routing, memory, compaction, computer-use]
 config_schema:
-  type: object
-  properties:
-    routing: {type: string, enum: ["off", "shadow", "on"], default: "off"}
-    skills: {type: string, enum: ["off", "on"], default: "off"}
-    notice: {type: string, enum: ["off", "on"], default: "off"}
+  routing: {type: str, description: "off | shadow | on"}
+  skills: {type: str, description: "off | on"}
+  notice: {type: str, description: "off | on"}
