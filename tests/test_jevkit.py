@@ -271,6 +271,26 @@ class RouteTests(unittest.TestCase):
         self.assertNotIn("Jane", json.dumps(transport.calls[0]["request"]))
 
 
+class RouteConfigTests(unittest.TestCase):
+    def test_shared_file_is_the_default_and_a_profile_overrides_one_tier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "hermes"
+            profile = root / "profiles" / "alpha"
+            (root / "jev").mkdir(parents=True)
+            (profile / "jev").mkdir(parents=True)
+            (root / "jev" / "routing.json").write_text(json.dumps(
+                {"tiers": {"simple": {"general": ["or:cheap"]}, "hard": {"general": ["or:big"]}}, "min_confidence": 0.7}))
+            (profile / "jev" / "routing.json").write_text(json.dumps({"tiers": {"hard": {"general": ["or:other"]}}}))
+            env = {"HERMES_HOME": str(profile), "XDG_CONFIG_HOME": str(Path(tmp) / "xdg")}
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("JEV_ROUTING_CONFIG", None)
+                config = route.load_config()
+                self.assertEqual(route.config_path(), profile / "jev" / "routing.json")
+            self.assertEqual(config["tiers"]["simple"]["general"], ["or:cheap"])
+            self.assertEqual(config["tiers"]["hard"]["general"], ["or:other"])
+            self.assertEqual(config["min_confidence"], 0.7)
+
+
 class RerankTests(unittest.TestCase):
     def test_ranks_drops_injection_and_hides_store_ids(self):
         def answer(name, q, state):
