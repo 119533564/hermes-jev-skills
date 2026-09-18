@@ -9,6 +9,7 @@ This repo is the public home of everything Jev does for a Hermes agent. If Jev's
 - a change to what is sent to Jev (the privacy boundary)
 - a fix to the plugin, the key flow or the installer
 - a new Hermes seam the plugin uses, or one that went away
+- any change to the model routing dashboard (`router-dashboard/` is its only source; the running service is started from this checkout)
 
 Each change comes with a test in `tests/`, an updated `SKILL.md` if an agent would do something differently, and a line in `CHANGELOG.md`. Bump `jevkit/__init__.py` and `hermes/plugin/hermes-jev/plugin.yaml` together.
 

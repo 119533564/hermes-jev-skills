@@ -9,3 +9,4 @@ routing.json
 state.json
 *.jsonl
 .venv/
+dist/

@@ -13,11 +13,15 @@ Give your agent a fast, cheap second brain for the small decisions.
 | **Computer use** | The next GUI action, from a table of actions you already judged safe | ~0.4 s per step |
 | **Browser use** | The next page action, same contract | ~0.4 s per step |
 
+Plus a **model routing dashboard** (`jev dashboard`): every profile's models on one page, an on/shadow/off switch for Jev routing, and a live view of where each turn is being sent. See [router-dashboard](router-dashboard/README.md).
+
 Built for [Hermes](https://github.com/NousResearch/hermes-agent). The skills and the `jev` command also work in Claude Code, Codex and anything else that reads `SKILL.md` files.
 
 ## Install
 
 **Point your agent at this repo** and say: *"Install Hermes Jev Skills from https://github.com/kerpopule/hermes-jev-skills"*. It will follow [AGENTS.md](AGENTS.md).
+
+**Got it as a zip?** Unzip it anywhere, then run the second and third commands below from that folder.
 
 Or by hand (Python 3.9+, no dependencies):
 
@@ -94,6 +98,7 @@ Safety rails that do not depend on Jev being right: risk words (production, dele
 jevkit/          the library and the `jev` command (stdlib only)
 skills/          seven SKILL.md skills, agent-agnostic
 hermes/plugin/   the Hermes plugin
+router-dashboard/  the model routing page (`jev dashboard`)
 install.py       installer / uninstaller
 tests/           offline tests, every Jev reply faked
 docs/            integration notes

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 (2026-09-18)
+
+- The model routing dashboard ships in the repo (`router-dashboard/`, `jev dashboard`): per-profile models, an All-profiles target with confirmation, an Off / Shadow / On switch for Jev routing, and a live view of decisions.
+- `scripts/build_release.sh` builds the shareable zip from the committed tree.
+
 ## 0.1.1 (2026-09-18)
 
 - Plugin manifest: `config_schema` in the flat shape Hermes expects (it logged a warning and skipped the old one).

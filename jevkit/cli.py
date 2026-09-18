@@ -122,6 +122,26 @@ def cmd_choose(args: argparse.Namespace) -> int:
         raise SystemExit(f"invalid request: {error}") from None
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """The model-routing page: per-profile models, an all-profiles target, the Jev switch and live decisions."""
+    import os
+    import subprocess
+
+    server = Path(__file__).resolve().parents[1] / "router-dashboard" / "server.py"
+    if not server.is_file():
+        raise SystemExit("the dashboard ships with the repo checkout; run `jev` from there")
+    # The dashboard needs PyYAML. Hermes' own interpreter always has it.
+    venv = catalog.hermes_root() / "hermes-agent" / "venv" / "bin" / "python"
+    python = str(venv) if venv.is_file() else sys.executable
+    command = [python, str(server), "--host", args.host, "--port", str(args.port), "--hermes-home", str(catalog.hermes_root())]
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        import secrets
+        token = os.environ.get("DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
+        os.environ["DASHBOARD_TOKEN"] = token
+        print(f"open once with the token: http://{args.host}:{args.port}/?token={token}", file=sys.stderr)
+    return subprocess.call(command)
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     request = _stdin_json()
     try:
@@ -185,6 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("choose", help="pick the next GUI or browser action from a candidate table")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(func=cmd_choose)
+
+    p = sub.add_parser("dashboard", help="open the model-routing page (models per profile, Jev switch, live decisions)")
+    p.add_argument("--host", default="127.0.0.1", help="keep loopback unless you are on a private network; other hosts require a token")
+    p.add_argument("--port", type=int, default=8791)
+    p.set_defaults(func=cmd_dashboard)
 
     p = sub.add_parser("ask", help="raw Jev call: {state, questions}")
     p.add_argument("--timeout", type=float, default=5)
