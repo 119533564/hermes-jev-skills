@@ -17,6 +17,18 @@ from jevkit import choose, client, compact, key_setup, keystore, privacy, rerank
 
 KEY = "apikey_" + "a1" * 30
 
+# The suite must behave the same on a machine with a real key and on one with none,
+# so it never consults the real environment, secret store or credentials file.
+_key_patch = mock.patch.object(keystore, "resolve", return_value=KEY)
+
+
+def setUpModule():
+    _key_patch.start()
+
+
+def tearDownModule():
+    _key_patch.stop()
+
 
 def fake(answer_for):
     """Build a transport that answers each question with answer_for(name, question, state)."""
