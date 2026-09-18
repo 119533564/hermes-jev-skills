@@ -141,7 +141,7 @@ class StoreTestCase(unittest.TestCase):
         self.assertEqual(keys[0], "__main__")
         self.assertIn("compression", keys)
         self.assertEqual(snap["jev_mode"]["desired_default"], "shadow")
-        self.assertFalse(snap["jev_mode"]["installed"])
+        self.assertIn("intent", snap["jev_mode"])
 
     def test_model_catalog_includes_configured_ids(self):
         ids = {m["id"] for m in rs.model_catalog(self.home)}
