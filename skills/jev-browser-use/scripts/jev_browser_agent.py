@@ -26,10 +26,19 @@ this script re-execs itself with the vendored repo's virtualenv python.
 from __future__ import annotations
 
 import argparse
+import atexit
+import contextlib
 import json
 import os
+import shutil
+import signal
+import socket
 import subprocess
 import sys
+import tempfile
+import time
+import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -38,6 +47,16 @@ VENV_PY = REPO / ".venv" / "bin" / "python"
 KEYCHAIN_TYPESAFE = ("Hermes TypeSafe API", "TYPESAFE_API_KEY")
 DEFAULT_TEXT_MODEL = "google/gemini-2.5-flash"
 DEFAULT_TEXT_BASE = "https://openrouter.ai/api/v1"
+
+# Chrome binaries we are willing to launch ourselves, in preference order.
+CHROME_CANDIDATES = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+]
 
 
 # ─ credentials ──────────────────────────────────────────────────────────────
@@ -111,6 +130,157 @@ def outcome_verified(title: str, heading: str, url: str, expect: str) -> bool:
     return expect.lower() in haystack
 
 
+# ── browser ownership ────────────────────────────────────────────────────────
+
+def find_chrome(env: Mapping[str, str] | None = None) -> str | None:
+    """Locate a Chrome/Chromium binary without ever touching the person's profile."""
+    env = env if env is not None else os.environ
+    for key in ("BH_CHROME_PATH", "CHROME_PATH"):
+        candidate = env.get(key)
+        if candidate and Path(candidate).exists():
+            return candidate
+    for candidate in CHROME_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    for name in ("google-chrome", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def chrome_args(port: int, profile_dir: str, url: str = "about:blank") -> list[str]:
+    """Flags for a throwaway, headless, isolation-friendly browser we own."""
+    return [
+        "--headless=new",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--enable-unsafe-swiftshader",
+        "--window-size=1280,900",
+        url,
+    ]
+
+
+def wait_for_cdp(port: int, timeout: float = 30.0, opener=None) -> str | None:
+    """Poll the DevTools endpoint until it hands us a websocket URL."""
+    opener = opener or (lambda url: urllib.request.urlopen(url, timeout=2))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            payload = json.loads(opener(f"http://127.0.0.1:{port}/json/version").read().decode())
+            websocket = payload.get("webSocketDebuggerUrl")
+            if websocket:
+                return websocket
+        except Exception:  # noqa: BLE001  (not up yet, or not a CDP port)
+            pass
+        time.sleep(0.5)
+    return None
+
+
+class OwnedChrome:
+    """A Chrome this process launched, on a throwaway profile, closed on exit.
+
+    The person's everyday browser is never attached to, and never has remote
+    debugging enabled. browser-harness needs a CDP endpoint, so when the caller
+    has not supplied one we bring our own.
+    """
+
+    def __init__(self, chrome_path: str, url: str = "about:blank", port: int | None = None,
+                 startup_timeout: float = 30.0):
+        self.chrome_path = chrome_path
+        self.url = url
+        self.port = port or free_port()
+        self.startup_timeout = startup_timeout
+        self.log_path: Path | None = None
+        self.profile_dir: str | None = None
+        self.process: subprocess.Popen | None = None
+        self.websocket: str | None = None
+
+    def start(self) -> str:
+        self.profile_dir = tempfile.mkdtemp(prefix="jev-browser-profile-")
+        handle, log_name = tempfile.mkstemp(prefix="jev-browser-chrome-", suffix=".log")
+        os.close(handle)
+        self.log_path = Path(log_name)
+        log = open(self.log_path, "wb")  # noqa: SIM115 (kept open for the child's lifetime)
+        self.process = subprocess.Popen(
+            [self.chrome_path, *chrome_args(self.port, self.profile_dir, self.url)],
+            stdout=log, stderr=subprocess.STDOUT,
+        )
+        websocket = wait_for_cdp(self.port, timeout=self.startup_timeout)
+        if not websocket:
+            tail = ""
+            with contextlib.suppress(Exception):
+                tail = self.log_path.read_text(errors="replace")[-400:]
+            self.stop()
+            raise RuntimeError(f"owned Chrome did not expose CDP on port {self.port}. {tail}".strip())
+        self.websocket = websocket
+        return websocket
+
+    def stop(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            for _ in range(20):
+                if self.process.poll() is not None:
+                    break
+                time.sleep(0.5)
+            if self.process.poll() is None:
+                self.process.kill()
+        if self.profile_dir:
+            shutil.rmtree(self.profile_dir, ignore_errors=True)
+            self.profile_dir = None
+
+    def __enter__(self) -> "OwnedChrome":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+
+@contextlib.contextmanager
+def browser_endpoint(args):  # retained for callers that prefer explicit scoping
+    if args.cdp:
+        os.environ["BU_CDP_WS"] = args.cdp
+        yield args.cdp
+        return
+    owned = start_owned_browser(args)
+    try:
+        yield owned.websocket
+    finally:
+        owned.stop()
+
+
+def start_owned_browser(args) -> "OwnedChrome":
+    """Launch our own Chrome when the caller did not supply a CDP endpoint."""
+    chrome = args.chrome_path or find_chrome()
+    if not chrome:
+        raise SystemExit(
+            "FAIL: no CDP endpoint was supplied and no Chrome/Chromium binary was found. "
+            "Pass --cdp ws://…, set BU_CDP_WS, install Chrome, or point BH_CHROME_PATH at one. "
+            "(Use --no-launch-chrome to require an attached browser instead.)"
+        )
+    owned = OwnedChrome(chrome, url="about:blank")
+    try:
+        os.environ["BU_CDP_WS"] = owned.start()
+    except RuntimeError as error:
+        raise SystemExit(f"FAIL: {error}") from error
+    print(f"  browser: our own Chrome (pid={owned.process.pid if owned.process else '?'}, "
+          f"port={owned.port}, throwaway profile) — closed on exit")
+    return owned
+
+
 # ── runner ───────────────────────────────────────────────────────────────────
 
 def ensure_importable(argv: list[str] | None = None) -> None:
@@ -146,6 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expect", default="", help="Substring that must appear in title/h1/url to PASS.")
     p.add_argument("--cdp", default=os.environ.get("BU_CDP_WS", ""),
                    help="Existing CDP websocket. Defaults to BU_CDP_WS / the attached browser.")
+    p.add_argument("--chrome-path", default=os.environ.get("BH_CHROME_PATH", ""),
+                   help="Chrome/Chromium binary to launch when no CDP endpoint is given.")
+    p.add_argument("--launch-chrome", dest="launch_chrome", action="store_true", default=True,
+                   help="Launch our own throwaway Chrome when no CDP endpoint is given (default).")
+    p.add_argument("--no-launch-chrome", dest="launch_chrome", action="store_false",
+                   help="Require an already-attached browser instead of launching one.")
     p.add_argument("--json", action="store_true", help="Emit a machine-readable result as the last line.")
     return p
 
@@ -170,10 +346,22 @@ def main(argv: list[str] | None = None) -> int:
     if not host_allowed(args.url, allow):
         print(f"FAIL: start URL host is not in the allowlist {allow}.")
         return 2
+    # Bring up the browser AFTER ensure_importable, because that call may re-exec this
+    # script into the vendored venv. A browser started before the exec is orphaned:
+    # the replacement process never runs the parent's atexit handler, so it leaks.
+    ensure_importable(argv)
+
     if args.cdp:
         os.environ["BU_CDP_WS"] = args.cdp
-
-    ensure_importable(argv)
+    elif not args.launch_chrome:
+        print("FAIL: --no-launch-chrome was set but no CDP endpoint was supplied.")
+        return 2
+    else:
+        owned = start_owned_browser(args)  # sets BU_CDP_WS for browser-harness
+        atexit.register(owned.stop)
+        for _signal in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(Exception):
+                signal.signal(_signal, lambda *_: (owned.stop(), sys.exit(130)))
 
     from jev_ultrafast import Agent
 
@@ -221,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         "left_allowlist": left_allowlist,
         "expected": args.expect,
         "verified": verified,
+        "browser": "attached" if args.cdp else "owned",
     }
     print(f"  final_url: {final_url}")
     print(f"  title: {title!r}")

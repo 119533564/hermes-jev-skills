@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 (2026-09-19)
+
+- **`jev-browser-use` path B actually runs now.** The runner required a CDP browser to already exist (`BU_CDP_WS` or a Chrome with remote debugging on) and simply failed on a machine without one. It now launches its own headless Chrome on a throwaway profile when no endpoint is given, closes it on exit, SIGINT and SIGTERM, and reports `browser: owned|attached`. `--no-launch-chrome`, `--chrome-path` and `BH_CHROME_PATH` control it. The person's everyday browser is never attached to.
+- Fixed the launch order: the browser is started *after* the vendored-venv re-exec. Starting it before meant the exec replaced the process and orphaned the browser and its throwaway profile.
+- New `tests/test_browser_runner.py`: chrome discovery, launch flags, CDP polling, the cleanup contract, the launch-order regression and the allowlist.
+
 ## 0.2.2 (2026-09-19)
 
 - **Memory filter safety fix.** A passage the privacy gate refuses to send is never injection-checked, but it was still returned in `selected_ids` with no warning — so text shaped like an injection could reach the agent as though it had been judged. Withheld passages are now screened locally (no network) for instruction shapes; matches are dropped into `dropped_injection_ids` and listed in the new `local_screen_ids`. Harmless withheld passages are still kept, so no memory is silently lost.
