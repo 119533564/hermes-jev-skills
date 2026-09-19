@@ -1,5 +1,5 @@
 name: hermes-jev
-version: 0.3.0
+version: 0.4.0
 description: TypeSafe Jev takes the cheap decisions - model routing, skill selection, memory filtering, compaction selection, GUI and browser action choice.
 author: Steve Darlow
 license: MIT
@@ -8,6 +8,8 @@ manifest_version: 2
 requires_env:
   - TYPESAFE_API_KEY
 provides_tools:
+  - jev_supervise
+  - jev_escalate
   - jev_memory_filter
   - jev_compact_select
   - jev_choose_action

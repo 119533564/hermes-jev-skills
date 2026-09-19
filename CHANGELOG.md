@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-09-19)
+
+Frontier work: pick the seat, then watch the run.
+
+- **`jevkit/ladder.py` + `jev escalate`** — an escalation ladder for hard work across paid frontier seats. A refusal is written to shared state, so one lane hitting a quota teaches all the others instead of forty agents rediscovering the same 429. A rung is skipped, never silently downgraded: when everything is full the decision says `forced` out loud rather than quietly serving hard work from a cheap model. Only the `hard` tier reaches it.
+- **`jevkit/supervise.py` + `jev supervise`** — Jev watches delegated frontier runs. Code decides what is free to decide (has output arrived, is it repeating, has the process exited); Jev judges only what code cannot (is this meaningful progress, is it waiting on an answer, has it given up, is it finished); the expensive supervisor is woken only when one of those crosses a threshold. A Jev failure means keep waiting, never abort.
+- **Scheduled turns are now routed, not skipped.** A cron turn is a ~37,000-character standing contract wrapped around a `## Prompt` of ~660 characters — the instruction is 1% of the envelope, which is why judging the envelope escalated everything. `unwrap()` pulls out the ask. Routing cron turns *without* unwrapping costs +115%; with it, +6%, and genuinely demanding jobs still reach the hard tier. Recurring jobs repeat their instruction verbatim, so decisions cache: 247 cron runs held 5 distinct asks.
+- **Privacy gate fix**: `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`, `GITHUB_TOKEN` and other env-var-style secrets were not caught, because the pattern only matched `secret_key` — the revealing word sits in the middle of the name. Found by a supervisor test; it affected every module.
+
 ## 0.3.0 (2026-09-19)
 
 - **`jev replay`**: offline evaluation. Replays logged turns through a policy and prices it against the baseline those turns actually ran on, so "is this router worth it" is arithmetic instead of an opinion. Only Jev is called; a few hundred turns costs cents.

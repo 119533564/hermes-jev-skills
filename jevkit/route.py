@@ -9,14 +9,16 @@ failed path keeps the model you were already on. Routing never blocks a turn.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import catalog as catalog_mod
-from . import client, privacy
+from . import client, ladder, privacy
 
 TIERS = ("simple", "medium", "hard")
 SPECIALTIES = ("general", "coding", "writing", "research", "vision")
@@ -49,11 +51,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "hard_needs_probability": 0.6,    # P(substantial or expert) needed before paying for the hard tier
     "simple_needs_probability": 0.7,  # P(trivial) needed before dropping to the cheapest tier
     "ask_chars": 2500,                # how much of a long turn Jev reads: the opening and, mostly, the end
-    # Turns that are a template wrapped around work Jev cannot see. Routing them is a coin toss, so they keep
-    # the model their profile or job was configured with.
-    "skip_prefixes": ["[kanban]", "[SESSION HANDOFF", "[cron]", "[scheduled]"],
-    "skip_session_prefixes": ["cron"],
+    # A scheduled or queued turn is a standing contract wrapped around one real instruction. Measured on this
+    # fleet, that instruction is ~1% of the envelope. Name the sections that hold it and the ones that are
+    # previous output, and the job gets judged on what it actually asks for.
+    "ask_sections": ["Prompt", "Task", "Request", "Instruction", "Objective", "Goal"],
+    "drop_sections": ["Your previous run's output", "Script Output", "Output from job",
+                      "Previous output", "Prior run", "Last run"],
+    # Recurring jobs repeat their instruction verbatim, so the same decision is reused instead of re-bought.
+    "cache_repeat_asks": True,
+    "cache_size": 512,
     "sticky_context_tokens": 32000,   # above this, do not downgrade: the cache rebuild costs more than it saves
+    # Hard work can be handed to a frontier seat instead of an OpenRouter model. The plugin can
+    # swap a model but not a provider connection, so this is a DELEGATION signal for the agent,
+    # never a silent switch — see jevkit/ladder.py.
+    "escalation": {"enabled": False, "rungs": []},
     "exclude": ["*:free", "cloudflare-ai-gateway:*"],
     "private_profiles": [],
     "tiers": {},                      # {"simple": {"general": ["provider:model", ...], "coding": [...]}, ...}
@@ -140,6 +151,51 @@ def _pick(config: Dict[str, Any], rows: Dict[str, Dict[str, Any]], tier: str, sp
     return None
 
 
+# ── envelopes ────────────────────────────────────────────────────────────────
+
+_H2 = re.compile(r"(?m)^[ \t]*#{2,3}[ \t]+(\S[^\n]*?)[ \t]*$")
+
+
+def unwrap(text: str, config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the instruction inside a scheduled/queued envelope, or the text unchanged.
+
+    A cron or worker turn is mostly a standing contract that is identical every run: the
+    anti-stall protocol, the status format, the previous run's output. Judging that says
+    nothing about this run. If a section names the actual ask, use only that section.
+    """
+    config = config or DEFAULT_CONFIG
+    wanted = [w.lower() for w in (config.get("ask_sections") or [])]
+    unwanted = [w.lower() for w in (config.get("drop_sections") or [])]
+    if not wanted or "#" not in text:
+        return text
+    heads = list(_H2.finditer(text))
+    if not heads:
+        return text
+    for index, match in enumerate(heads):
+        title = match.group(1).strip().lower().rstrip(":")
+        if not any(title == w or title.startswith(w + " ") for w in wanted):
+            continue
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        body = text[match.end():end].strip()
+        if len(body) >= 24:                      # a heading with nothing under it is not the ask
+            return body
+    # No ask section, but previous output can still be dropped so the rest is judged on its merits.
+    if unwanted:
+        keep, cut = [], 0
+        for index, match in enumerate(heads):
+            title = match.group(1).strip().lower().rstrip(":")
+            if any(title.startswith(w) for w in unwanted):
+                end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+                keep.append(text[cut:match.start()])
+                cut = end
+        if keep:
+            keep.append(text[cut:])
+            trimmed = "".join(keep).strip()
+            if len(trimmed) >= 24:
+                return trimmed
+    return text
+
+
 # ── decision ─────────────────────────────────────────────────────────────────
 
 def _features(prompt: str, context_tokens: int) -> Dict[str, Any]:
@@ -151,6 +207,25 @@ def _features(prompt: str, context_tokens: int) -> Dict[str, Any]:
         "risk_words": bool(_HARD_RISK.search(prompt)),
         "context": "small" if context_tokens < 8000 else "medium" if context_tokens < 64000 else "large",
     }
+
+
+# A repeating job asks the same thing every run; its answer is worth exactly one Jev call.
+_DECISIONS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+
+def _cache_key(ask: str, profile: Optional[str], only_provider: Optional[str], has_images: bool, pinned: bool) -> str:
+    material = "\x00".join([ask, str(profile), str(only_provider), str(has_images), str(pinned), POLICY_VERSION])
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+
+
+def _remember(key: Optional[str], decision: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Cache only decisions that will still be right next time: never a transient failure."""
+    if key and decision.get("tier"):
+        _DECISIONS[key] = decision
+        _DECISIONS.move_to_end(key)
+        while len(_DECISIONS) > int(config.get("cache_size", 512)):
+            _DECISIONS.popitem(last=False)
+    return decision
 
 
 def _keep(current: Optional[str], reason: str, **extra: Any) -> Dict[str, Any]:
@@ -172,17 +247,24 @@ def decide(
         return _keep(current, "you pinned this model")
     if not (config.get("tiers") or {}):
         return _keep(current, "no tiers configured; run `jev models suggest --write`")
-    head = prompt.lstrip()[:80]
-    if any(head.startswith(prefix) for prefix in config.get("skip_prefixes") or []) or \
-            any(str(session_id).startswith(prefix) for prefix in config.get("skip_session_prefixes") or []):
-        return _keep(current, "automated turn; keeps its configured model")
     if not prompt.strip():
         return _keep(current, "empty turn")
 
-    # Judge the ask, not the boilerplate around it. A long turn is mostly standing instructions; what is
-    # being asked for sits at the start and, far more often, at the end.
+    # Judge the ask, not the contract around it. A scheduled or queued turn is a standing brief wrapped
+    # around one real instruction; unwrap to that first. Whatever is left, a long turn keeps its opening
+    # and — far more often where the actual request lives — its end.
     limit = int(config.get("ask_chars", 2500))
-    ask = prompt if len(prompt) <= limit else prompt[:limit // 4] + "\n[…]\n" + prompt[-(limit - limit // 4):]
+    inner = unwrap(prompt, config)
+    unwrapped = inner is not prompt and inner != prompt
+    ask = inner if len(inner) <= limit else inner[:limit // 4] + "\n[…]\n" + inner[-(limit - limit // 4):]
+
+    # A recurring job repeats its instruction verbatim, so buy the decision once and reuse it.
+    cache_key = None
+    if config.get("cache_repeat_asks", True):
+        cache_key = _cache_key(ask, profile, only_provider, has_images, bool(pinned))
+        cached = _DECISIONS.get(cache_key)
+        if cached is not None:
+            return {**cached, "cached": True}
     risky = bool(_HARD_RISK.search(privacy.normalize(ask)))
     private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(ask)
     mode = "features" if private else config.get("mode", "redacted-text")
@@ -243,10 +325,21 @@ def decide(
             return _keep(current, "large context; switching down would cost more than it saves", private=private)
 
     provider, model = picked.split(":", 1)
-    return {
+    escalation = None
+    settings = config.get("escalation") or {}
+    if tier == "hard" and settings.get("enabled") and settings.get("rungs"):
+        # A frontier seat is worth its cost only on work that earned the hard tier. Everything
+        # below hard stays on OpenRouter, which is the whole point of paying for frontier seats.
+        escalation = ladder.choose(settings["rungs"])
+        escalation["stakes"] = round(stakes, 3)
+
+    return _remember(cache_key, {
         "routed": picked != current, "model": picked, "provider": provider, "model_id": model, "tier": tier,
+        **({"escalate": escalation} if escalation else {}),
         "specialty": specialty, "confidence": round(confidence, 3), "difficulty": round(difficulty, 2),
         "costly_mistake": round(stakes, 3), "private": private, "mode": mode, "latency_ms": reply["latency_ms"],
-        "policy": POLICY_VERSION, "reason": f"{tier} {specialty}",
-        "notice": f"[Jev] {tier} · {specialty} → {model} · confidence {confidence:.2f}",
-    }
+        "policy": POLICY_VERSION, "reason": f"{tier} {specialty}", "unwrapped": unwrapped,
+        "notice": (f"[Jev] {tier} · {specialty} → {model} · confidence {confidence:.2f}"
+                   + (f" · escalate to {escalation['rung']}" + (" (forced)" if escalation.get("forced") else "")
+                      if escalation and escalation.get("rung") else "")),
+    }, config)

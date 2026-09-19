@@ -9,9 +9,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, rerank, replay, route, skillpick
+from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, rerank, replay, route, skillpick, supervise
 
 
 def _stdin_json() -> Any:
@@ -122,6 +122,42 @@ def cmd_choose(args: argparse.Namespace) -> int:
         raise SystemExit(f"invalid request: {error}") from None
 
 
+def _rungs(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    settings = (config or route.load_config()).get("escalation") or {}
+    return list(settings.get("rungs") or [])
+
+
+def cmd_ladder(args: argparse.Namespace) -> int:
+    """Which frontier seat takes hard work, and which ones are currently full."""
+    rungs = _rungs()
+    if args.action == "status":
+        return _out(ladder.status(rungs))
+    if args.action == "choose":
+        if not rungs:
+            raise SystemExit("no escalation.rungs configured in routing.json")
+        return _out(ladder.choose(rungs, skip_probe=args.no_probe))
+    if args.action == "refuse":
+        if not args.rung:
+            raise SystemExit("refuse needs --rung")
+        return _out(ladder.refuse(args.rung, args.reason or "refused", cooldown=args.cooldown))
+    ladder.clear(args.rung)
+    return _out({"cleared": args.rung or "all"})
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """Assess one delegated run: is it progressing, stuck, waiting on you, or done."""
+    request = _stdin_json() if not args.tail_file else {
+        "goal": args.goal or "", "tail": Path(args.tail_file).read_text(encoding="utf-8", errors="replace")}
+    goal = request.get("goal") or args.goal or ""
+    if not goal.strip():
+        raise SystemExit("supervise needs a goal (--goal, or a `goal` field on stdin)")
+    snap = supervise.assess(
+        goal, str(request.get("tail") or ""), elapsed_s=float(request.get("elapsed_s") or 0),
+        quiet_s=float(request.get("quiet_s") or 0), new_output=bool(request.get("new_output", True)),
+        looping=bool(request.get("looping")), exited=request.get("exited"), timeout=args.timeout)
+    return _out(snap.as_dict())
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     """Replay real turns through the policy and price the result against the baseline."""
     turns = replay.turns_from_jsonl(args.turns, current=args.current, limit=args.limit)
@@ -216,6 +252,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("choose", help="pick the next GUI or browser action from a candidate table")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(func=cmd_choose)
+
+    p = sub.add_parser("ladder", help="the frontier escalation ladder: who takes hard work, and who is full")
+    p.add_argument("action", choices=["status", "choose", "refuse", "clear"])
+    p.add_argument("--rung", help="rung name, for refuse/clear")
+    p.add_argument("--reason", help="why it refused, e.g. the quota message")
+    p.add_argument("--cooldown", type=float, default=ladder.DEFAULT_COOLDOWN, help="seconds to skip this rung")
+    p.add_argument("--no-probe", action="store_true", help="trust the cooldowns; do not run availability probes")
+    p.set_defaults(func=cmd_ladder)
+
+    p = sub.add_parser("supervise", help="assess a delegated run: progressing, stuck, waiting on you, or done")
+    p.add_argument("--goal", help="what the delegated run was asked to do")
+    p.add_argument("--tail-file", help="file holding the run's recent output; otherwise read JSON on stdin")
+    p.add_argument("--timeout", type=float, default=5.0)
+    p.set_defaults(func=cmd_supervise)
 
     p = sub.add_parser("replay", help="replay logged turns through the policy and price it against the baseline")
     p.add_argument("turns", help="JSONL file, one object per turn with at least a `prompt` field")
