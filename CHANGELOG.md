@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Browser use: the measured DOM harness, ported.
+
+- **`--harness v2` is now the default for the browser runner**, and it applies the DOM adaptations WindTunnel measured at 25/49 tasks on its September 18 cohort: occluded controls are dropped by centre-point hit test, non-semantic `[aria-selected]`/`[tabindex]` fallback controls are offered, the 250-action cap keeps one action per node per pass instead of truncating (so a long `<select>` cannot starve the rest of the page), password values are never read back as text, and every decision request carries the measured v1 selection policy with its DONE/BLOCKED descriptions. `--harness upstream` runs the pinned checkout untouched; both are reported in `--json` as `harness`, `harness_applied` and `harness_notes`.
+- The four changes are one measured bundle, not four attributable wins, and the 25/49 figure belongs to WindTunnel's corpus. This repo claims no improvement from them on any other task.
+- Applied at run time through two seams of the pinned checkout (`jev_ultrafast.browser.READ_STATE`/`MARKER` and `jev_ultrafast.model.post_json`); nothing is written to the vendored checkout, and a checkout that has drifted is flagged in `harness_notes` instead of silently running the old policy.
+- Live check on the documented smoke goal (Wikipedia, Rosetta Stone): upstream 6 ticks / 2 steps / verified, v2 5 ticks / 2 steps / verified. One task is not a benchmark.
+- The `MARKER` constant is derived from `READ_STATE` at import time and drives `fresh()`. Swapping `READ_STATE` alone made every page read as permanently stale — the loop observed ten times without acting. Caught by the live A/B, fixed, and pinned by `tests/test_harness_v2.py`.
+- Snapshot and policy carry their provenance: adapted from [nekuda-ai/WindTunnel](https://github.com/nekuda-ai/WindTunnel) (Apache-2.0), which modifies [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT) pinned at `452c1ad`.
+
 ## 0.4.0 (2026-09-19)
 
 Frontier work: pick the seat, then watch the run.

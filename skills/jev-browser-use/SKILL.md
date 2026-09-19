@@ -37,6 +37,8 @@ python3 <this skill>/scripts/jev_browser_agent.py \
 
 Set `JEV_ULTRAFAST_REPO` to your checkout. **The runner brings its own browser**: when no CDP endpoint is given (`--cdp`, or `BU_CDP_WS` in the environment), it launches a headless Chrome on a throwaway profile and closes it on exit, so the person's everyday browser is never attached to and never has remote debugging enabled. The result reports `"browser": "owned"` or `"attached"`. Use `--no-launch-chrome` when you require an already-attached browser instead, `--chrome-path`/`BH_CHROME_PATH` to name the binary.
 
+`--harness` selects which measured loop runs and defaults to `v2`: `v2` applies the DOM adaptations WindTunnel measured at 25/49 tasks (occluded controls dropped by hit test, fallback controls offered, a fair 250-action cap, password values never read back, and the measured v1 selection policy on every decision request). `upstream` runs the pinned checkout untouched. Both run Jev for every step. The result reports `harness`, `harness_applied` and `harness_notes`, and a checkout that has drifted from the pinned commit is flagged there rather than silently running the old policy.
+
 Exit 0 only when `--expect` is found in the live title, heading or URL; 4 unverified; 5 left the allowlist; 2 refused to start. It needs a text model key for typed values (`TEXT_MODEL_API_KEY`, OpenAI-compatible base URL in `TEXT_MODEL_BASE_URL`). Known gaps: shadow roots, iframes, canvas, file uploads, pop-up tabs. Report the gap; do not invent a DOM workaround.
 
 ## Rules for both

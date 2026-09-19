@@ -48,6 +48,11 @@ KEYCHAIN_TYPESAFE = ("Hermes TypeSafe API", "TYPESAFE_API_KEY")
 DEFAULT_TEXT_MODEL = "google/gemini-2.5-flash"
 DEFAULT_TEXT_BASE = "https://openrouter.ai/api/v1"
 
+# Measured harnesses. Kept as plain constants so the parser and its tests never
+# need the vendored checkout or the harness module importable.
+DEFAULT_HARNESS = "v2"
+HARNESS_CHOICES = ("v2", "upstream")
+
 # Chrome binaries we are willing to launch ourselves, in preference order.
 CHROME_CANDIDATES = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -323,7 +328,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-launch-chrome", dest="launch_chrome", action="store_false",
                    help="Require an already-attached browser instead of launching one.")
     p.add_argument("--json", action="store_true", help="Emit a machine-readable result as the last line.")
+    p.add_argument("--harness", choices=HARNESS_CHOICES, default=DEFAULT_HARNESS,
+                   help="Which measured harness to run: 'v2' applies WindTunnel's DOM "
+                        "adaptations (occlusion audit, fair action cap, password redaction, "
+                        "v1 selection policy); 'upstream' runs the pinned checkout untouched.")
     return p
+
+
+def apply_harness(harness: str) -> tuple[dict, list[str]]:
+    """Apply the requested harness to the already-imported checkout.
+
+    Imported here rather than at module scope so the runner keeps working when the
+    vendored checkout is absent (parser and guard-rail tests run anywhere).
+    """
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import harness_v2
+
+    notes: list[str] = []
+    applied = harness_v2.apply(harness, notes)
+    if (DEFAULT_HARNESS, HARNESS_CHOICES) != (harness_v2.HARNESS_V2, harness_v2.HARNESS_CHOICES):
+        notes.append(
+            "harness: the runner's harness names and the harness module's have diverged "
+            f"({HARNESS_CHOICES} vs {harness_v2.HARNESS_CHOICES})"
+        )
+    return applied, notes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -350,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     # script into the vendored venv. A browser started before the exec is orphaned:
     # the replacement process never runs the parent's atexit handler, so it leaks.
     ensure_importable(argv)
+    harness_applied, harness_notes = apply_harness(args.harness)
+    print(f"harness: {args.harness} ({', '.join(harness_notes) or 'no notes'})")
 
     if args.cdp:
         os.environ["BU_CDP_WS"] = args.cdp
@@ -410,6 +442,9 @@ def main(argv: list[str] | None = None) -> int:
         "expected": args.expect,
         "verified": verified,
         "browser": "attached" if args.cdp else "owned",
+        "harness": args.harness,
+        "harness_applied": harness_applied,
+        "harness_notes": harness_notes,
     }
     print(f"  final_url: {final_url}")
     print(f"  title: {title!r}")

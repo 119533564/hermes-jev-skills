@@ -110,4 +110,4 @@ python3 -m unittest discover -s tests
 
 ## License
 
-MIT. Jev and TypeSafe are products of TypeSafe AI; this project is independent. Optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled.
+MIT. Jev and TypeSafe are products of TypeSafe AI; this project is independent. Optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled, and ports the DOM harness adaptations from [nekuda-ai/WindTunnel](https://github.com/nekuda-ai/WindTunnel) (Apache-2.0) as files under `skills/jev-browser-use/scripts/windtunnel_v2_*`.
