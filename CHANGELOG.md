@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 (2026-09-19)
+
+- **Memory filter safety fix.** A passage the privacy gate refuses to send is never injection-checked, but it was still returned in `selected_ids` with no warning — so text shaped like an injection could reach the agent as though it had been judged. Withheld passages are now screened locally (no network) for instruction shapes; matches are dropped into `dropped_injection_ids` and listed in the new `local_screen_ids`. Harmless withheld passages are still kept, so no memory is silently lost.
+- `jev_memory_filter`'s tool description and `jev-memory` now say that `unjudged_ids` is *unchecked*, not verified.
+
 ## 0.2.1 (2026-09-19)
 
 - `jev-computer-use` and `jev-browser-use` now carry a **Managed fleets** section: the driver command, credential source, vendor checkout and machine map belong to the fleet, not this repo, and the fleet note they point at is authoritative for them.

@@ -7,12 +7,30 @@ poisoned one. Failure returns the shortlist untouched.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from . import client, privacy
 
 MAX_CANDIDATES = 60
 PASSAGE_CHARS = 900
+
+# Passages withheld from Jev by the local privacy gate are never injection-checked,
+# so a local, no-network screen looks for the instruction shapes injections use.
+# Anything it catches is dropped exactly like a Jev-flagged passage.
+INSTRUCTION_PATTERNS = re.compile(
+    r"(?i)("
+    r"ignore\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?)"
+    r"|disregard\s+(your\s+|all\s+|the\s+)?(previous|prior|instructions?|rules?|safety)"
+    r"|system\s*:\s*you"
+    r"|developer\s+mode"
+    r"|you\s+are\s+now\s+(in|a|an|the)"
+    r"|(reveal|print|output|send|email|exfiltrate)\s+(me\s+)?(the\s+|your\s+)?"
+    r"(api[\s_-]?key|key|secret|token|password|credentials?)"
+    r"|(run|execute)\s+(this|the\s+following)\s+(command|script|curl)"
+    r"|curl\s+https?://"
+    r"|skip\s+(the\s+)?(privacy|safety)\s+(gate|check|rules?)"
+    r")")
 
 
 def rerank(
@@ -63,8 +81,16 @@ def rerank(
             ranked.append((-relevance, index, str(item["id"])))
     ranked.sort()
     selected = [identifier for _, _, identifier in ranked][:top_k]
-    # Passages we refused to send were not judged. Keep them; do not silently lose memory.
-    unjudged = [str(item["id"]) for index, item in enumerate(items) if index not in {i for i, _ in sendable}]
-    return {"status": "ok", "selected_ids": selected + unjudged, "dropped_injection_ids": poisoned,
+    # Passages we refused to send were not judged. Keep them; do not silently lose memory —
+    # unless the local screen finds AI-directed instructions in them, which we cannot leave
+    # to an unchecked path.
+    withheld = [(index, item) for index, item in enumerate(items)
+                if index not in {i for i, _ in sendable}]
+    locally_screened = [str(item["id"]) for _, item in withheld
+                        if INSTRUCTION_PATTERNS.search(str(item.get("text", "")))]
+    unjudged = [str(item["id"]) for _, item in withheld]
+    kept_unjudged = [identifier for identifier in unjudged if identifier not in locally_screened]
+    return {"status": "ok", "selected_ids": selected + kept_unjudged,
+            "dropped_injection_ids": poisoned + locally_screened, "local_screen_ids": locally_screened,
             "answerable": round(answers["answerable"]["noul"], 3), "scores": scores, "unjudged_ids": unjudged,
             "latency_ms": reply["latency_ms"], "usage": reply["usage"]}
