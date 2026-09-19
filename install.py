@@ -163,21 +163,40 @@ def install_cli(check: bool) -> Dict[str, object]:
             **({} if on_path else {"hint": f"add {target.parent} to PATH, or call {REPO / 'bin' / 'jev'} directly"})}
 
 
+def home_warning(hermes: Path) -> str | None:
+    """Warn when the resolved Hermes home is a single profile, not the fleet root.
+
+    Agents run with ``HERMES_HOME`` set to their own profile directory, so a bare
+    ``python3 install.py`` from an agent shell installs for that lane only and every
+    other lane keeps the old copy.
+    """
+    if any(part == "profiles" for part in hermes.parts):
+        return (f"HERMES_HOME resolved to a profile home ({hermes}), so this install "
+                f"covers that lane only. For the whole fleet pass "
+                f"--hermes-home {Path.home() / '.hermes'}")
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
-    parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes"))
+    parser.add_argument("--hermes-home", default=None,
+                        help="Hermes root (default: $HERMES_HOME, else ~/.hermes)")
     parser.add_argument("--enable", default="all", help="Hermes profiles to enable the plugin in: all, none, or a,b,c")
     parser.add_argument("--skills-dir", action="append", default=[], help="extra skill folder to install into")
     args = parser.parse_args()
 
     home = Path.home()
-    hermes = Path(args.hermes_home).expanduser()
+    hermes = Path(args.hermes_home).expanduser() if args.hermes_home else Path(
+        os.environ.get("HERMES_HOME") or str(home / ".hermes")).expanduser()
     folders = [Path(p).expanduser() for p in args.skills_dir]
     folders += [p for p in (home / ".claude" / "skills", home / ".codex" / "skills", home / ".agents" / "skills") if p.parent.is_dir()]
 
     report: Dict[str, object] = {"repo": str(REPO), "mode": "uninstall" if args.uninstall else "check" if args.check else "install"}
+    warning = home_warning(hermes)
+    if warning:
+        report["warning"] = warning
     if args.uninstall:
         if hermes.is_dir():
             report["hermes"] = uninstall_hermes(hermes)

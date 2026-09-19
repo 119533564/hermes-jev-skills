@@ -51,3 +51,20 @@ Driving a GUI gives you no new permissions. Sending, publishing, paying, purchas
 If the driver, the key or the target is unavailable: stop and say what is missing. Do not improvise another way to control the screen.
 
 `jev choose --mock` answers `reobserve` with no network call, for testing your loop.
+
+## Managed fleets
+
+This skill is the *loop*. Machine-specific runtime — which driver binary to start, how it is
+registered as an MCP server, where the credential comes from, which machine map to resolve
+paths against, and which older skills are retired — belongs to the fleet, not to this public
+repo. On a managed fleet, read the fleet's `shared/rules/jev-computer-use-fleet.md` (Hermes:
+`~/.hermes/shared/rules/`) before the first GUI action, and resolve `$HOME`-relative paths
+against that fleet's machine map.
+
+## Retired schema — do not reuse it
+
+An earlier preview of this loop used `hermes.cua_jev_choice_request_v1`: `capture_id`, pixel
+`bounds` and a per-region `confidence`, pinned to model `jev-1.13.0`. It is withdrawn and
+incompatible with the request above. Regions here carry `id`, `role`, `label`, `interactive`
+and no coordinates; the model is `jev-latest`. A script or skill that still sends the old
+shape must be updated, not renamed. If something hands you the old schema, stop and report it.

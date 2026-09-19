@@ -23,6 +23,10 @@ security:
 
 
 class InstallTests(unittest.TestCase):
+    def test_home_warning_flags_a_profile_scoped_install(self):
+        self.assertIsNotNone(install.home_warning(Path("/srv/hermes/profiles/devbot")))
+        self.assertIsNone(install.home_warning(Path("/srv/hermes")))
+
     def test_enable_and_disable_touch_only_the_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.yaml"

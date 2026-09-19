@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-09-19)
+
+- `jev-computer-use` and `jev-browser-use` now carry a **Managed fleets** section: the driver command, credential source, vendor checkout and machine map belong to the fleet, not this repo, and the fleet note they point at is authoritative for them.
+- `jev-computer-use` documents the withdrawn preview schema `hermes.cua_jev_choice_request_v1` (`capture_id`, pixel `bounds`, per-region `confidence`, model `jev-1.13.0`) as incompatible with `jev.action_choice_request_v1`. Scripts must be updated, not renamed.
+- `jev-browser-use` states that a fleet may make Jev Ultrafast the required default, with the own-browser-tool path reserved for Ultrafast's documented gaps, and that Jev is never bypassed in either path.
+
 ## 0.2.0 (2026-09-18)
 
 - The model routing dashboard ships in the repo (`router-dashboard/`, `jev dashboard`): per-profile models, an All-profiles target with confirmation, an Off / Shadow / On switch for Jev routing, and a live view of decisions.
