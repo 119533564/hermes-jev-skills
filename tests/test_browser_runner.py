@@ -42,6 +42,13 @@ class ChromeArgsTests(unittest.TestCase):
         ports = {runner.free_port() for _ in range(5)}
         self.assertTrue(all(1024 < p < 65536 for p in ports))
 
+    def test_webmcp_is_on_for_our_own_profile(self):
+        # The page-side WebMCP tool surface is off by default in Chrome 153. Our
+        # throwaway profile runs with it on so a site's declared tools are usable
+        # the moment a site declares them.
+        args = runner.chrome_args(9333, "/tmp/profile-xyz")
+        self.assertIn("--enable-features=WebMCPTesting", args)
+
 
 class CdpPollTests(unittest.TestCase):
     def test_returns_the_websocket_when_the_endpoint_answers(self):

@@ -161,7 +161,15 @@ def free_port() -> int:
 
 
 def chrome_args(port: int, profile_dir: str, url: str = "about:blank") -> list[str]:
-    """Flags for a throwaway, headless, isolation-friendly browser we own."""
+    """Flags for a throwaway, headless, isolation-friendly browser we own.
+
+    ``--enable-features=WebMCPTesting`` turns on the page-side WebMCP tool surface
+    (``document.modelContext`` with registerTool/getTools/executeTool). It is off by
+    default in Chrome 153 and costs nothing on pages that never register a tool, so
+    our own throwaway profile runs with it on and we are ready when a site declares
+    tools. Verified on Chrome 153.0.8010.48: without the flag
+    ``document.modelContext`` is ``undefined``, with it the five members are present.
+    """
     return [
         "--headless=new",
         f"--remote-debugging-port={port}",
@@ -173,6 +181,7 @@ def chrome_args(port: int, profile_dir: str, url: str = "about:blank") -> list[s
         "--disable-sync",
         "--metrics-recording-only",
         "--enable-unsafe-swiftshader",
+        "--enable-features=WebMCPTesting",
         "--window-size=1280,900",
         url,
     ]
