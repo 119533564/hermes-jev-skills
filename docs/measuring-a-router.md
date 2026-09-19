@@ -92,3 +92,31 @@ On the fleet this repo was built for, that took ten minutes and reordered every 
   the opposite of what the per-call price table suggests.
 
 None of that is visible from a price table, a benchmark, or a replay. Get the invoice first.
+
+## A session that never ends is the most expensive thing you own
+
+Before tuning which model answers, check how much conversation each answer carries.
+
+On the deployment this repo was built for, two agents shared a $190/month run rate. The
+cause was not the model and not the number of requests — it was **236,250 tokens per
+request**. A 1,000,000-token context with a 0.50 compaction threshold lets a session grow
+to 500k tokens before compacting and keeps a 100k tail, and one conversation had been
+running for seventeen days and 2,255 messages. Every turn re-sent all of it.
+
+Two fixes, in order of effect:
+
+1. **End sessions on a schedule.** `hermes/scripts/nightly-handoff.py` writes a handoff
+   capsule and closes each live conversation once a night. The next morning opens fresh
+   and receives the capsule, so the agent knows what it was doing without carrying the
+   transcript that proves it.
+2. **Lower the context ceiling.** The compaction threshold is a fraction of
+   `context_length`, so a 1M window is a decision to let sessions reach half a million
+   tokens. 300k compacts at 150k.
+
+Check it on your own deployment with one query:
+
+```sql
+select id, message_count from sessions where ended_at is null order by message_count desc limit 5;
+```
+
+If the top row is in the thousands, no amount of model routing will matter next to this.

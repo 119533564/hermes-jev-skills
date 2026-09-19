@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 (2026-09-19)
+
+- **`hermes/scripts/nightly-handoff.py`** — close every live conversation once a night and leave tomorrow a capsule. Written for a deployment where one conversation had reached 2,255 messages and seventeen days, re-sent in full on every turn. Conservative by construction: only sessions with recent activity and real content, capped per profile, `--dry-run` touches nothing, and **a session is only closed after its capsule is safely written** — losing the thread is worse than a large context.
+- Resolves the Hermes CLI from the installation root even when `HERMES_HOME` points at a profile, which is how per-profile state is addressed. `HERMES_CLI` overrides.
+
 ## 0.6.1 (2026-09-19)
 
 - **Writer response shape** — `call_llm` returns a `ChatCompletion` object on some hosts, not a dict. `(response or {}).get("choices")` raised `AttributeError`, which `build()` caught, so every capsule silently took the transcript fallback and looked like a bad summary rather than a broken one. `handoff.extract_text()` now handles a string, an OpenAI-shaped dict, an SDK object, and content-part lists. Caught on a live deployment, not in review.
