@@ -34,7 +34,19 @@ def _setting(name: str, default: Any) -> Any:
 
 
 def _jevkit():
-    """jevkit if the hermes-jev plugin is installed beside us; otherwise handoff runs without Jev."""
+    """jevkit from beside us, or from the hermes-jev plugin; otherwise handoff runs without Jev."""
+    # Vendored copy first: it makes this plugin self-contained, which matters when it is
+    # deployed to a host that does not run the rest of the Jev toolkit.
+    local = Path(__file__).resolve().parent
+    if (local / "jevkit" / "compact.py").is_file():
+        import sys
+        if str(local) not in sys.path:
+            sys.path.insert(0, str(local))
+        try:
+            from jevkit import compact  # type: ignore
+            return compact
+        except Exception:  # noqa: BLE001
+            pass
     try:
         from hermes_jev.jevkit import compact  # type: ignore
         return compact
@@ -59,13 +71,8 @@ def _writer() -> Any:
     def write(prompt: str) -> str:
         from agent.auxiliary_client import call_llm  # type: ignore
 
-        response = call_llm(task="compression", messages=[{"role": "user", "content": prompt}])
-        if isinstance(response, str):
-            return response
-        choices = (response or {}).get("choices") or []
-        if choices:
-            return str((choices[0].get("message") or {}).get("content") or "")
-        return ""
+        return handoff.extract_text(
+            call_llm(task="compression", messages=[{"role": "user", "content": prompt}]))
     return write
 
 

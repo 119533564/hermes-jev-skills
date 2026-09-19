@@ -987,3 +987,77 @@ class HandoffPluginTests(unittest.TestCase):
         text = self.ho.injection("## Working on\nthe router")
         self.assertIn("not a new instruction", text)
         self.assertIn("the router", text)
+
+
+class HandoffCliResolutionTests(unittest.TestCase):
+    """HERMES_HOME may be a profile; the CLI lives under the installation root."""
+
+    def setUp(self):
+        import importlib.util
+        root = Path(__file__).resolve().parents[1] / "hermes" / "plugin" / "hermes-handoff"
+        spec = importlib.util.spec_from_file_location("ho2", root / "handoff.py")
+        self.ho = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ho)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _install(self, venv_name):
+        root = Path(self.tmp.name) / "install"
+        binary = root / "hermes-agent" / venv_name / "bin" / "hermes"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        profile = root / "profiles" / "lane-a"
+        profile.mkdir(parents=True)
+        return root, profile, binary
+
+    def test_found_from_a_profile_home_with_a_versioned_venv(self):
+        root, profile, binary = self._install("venv311-sqlite-safe-20260908")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(profile)}, clear=False):
+            os.environ.pop("HERMES_CLI", None)
+            self.assertEqual(self.ho._hermes_bin(), [str(binary)])
+
+    def test_found_from_the_root_home(self):
+        root, profile, binary = self._install("venv")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(root)}, clear=False):
+            os.environ.pop("HERMES_CLI", None)
+            self.assertEqual(self.ho._hermes_bin(), [str(binary)])
+
+    def test_explicit_override_wins(self):
+        root, profile, binary = self._install("venv")
+        other = Path(self.tmp.name) / "elsewhere-hermes"
+        other.write_text("#!/bin/sh\n")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(profile), "HERMES_CLI": str(other)}):
+            self.assertEqual(self.ho._hermes_bin(), [str(other)])
+
+
+class WriterResponseShapeTests(unittest.TestCase):
+    """Hosts return a string, a dict, or an SDK object. Assuming one shape broke every capsule."""
+
+    def setUp(self):
+        import importlib.util
+        root = Path(__file__).resolve().parents[1] / "hermes" / "plugin" / "hermes-handoff"
+        spec = importlib.util.spec_from_file_location("ho3", root / "handoff.py")
+        self.ho = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ho)
+
+    def test_plain_string(self):
+        self.assertEqual(self.ho.extract_text("## Working on\nx"), "## Working on\nx")
+
+    def test_openai_shaped_dict(self):
+        self.assertEqual(self.ho.extract_text({"choices": [{"message": {"content": "hello"}}]}), "hello")
+
+    def test_sdk_object_without_get(self):
+        """The real failure: ChatCompletion has attributes and no .get, so .get('choices') raised."""
+        message = type("M", (), {"content": "from an object"})()
+        choice = type("C", (), {"message": message})()
+        completion = type("ChatCompletion", (), {"choices": [choice]})()
+        self.assertFalse(hasattr(completion, "get"))
+        self.assertEqual(self.ho.extract_text(completion), "from an object")
+
+    def test_content_parts_list(self):
+        self.assertEqual(self.ho.extract_text({"choices": [{"message": {"content": [{"text": "a"}, {"text": "b"}]}}]}),
+                         "a b")
+
+    def test_empty_shapes_return_empty_not_an_exception(self):
+        for value in (None, {}, {"choices": []}, object(), 7):
+            self.assertEqual(self.ho.extract_text(value), "")

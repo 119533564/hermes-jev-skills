@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 (2026-09-19)
+
+- **Writer response shape** — `call_llm` returns a `ChatCompletion` object on some hosts, not a dict. `(response or {}).get("choices")` raised `AttributeError`, which `build()` caught, so every capsule silently took the transcript fallback and looked like a bad summary rather than a broken one. `handoff.extract_text()` now handles a string, an OpenAI-shaped dict, an SDK object, and content-part lists. Caught on a live deployment, not in review.
+
 ## 0.6.0 (2026-09-19)
 
 - **`hermes-handoff` plugin** — say `handoff` (or `/handoff`) and the session closes deliberately: Jev marks which turns must survive word for word, the host's existing auxiliary model writes a five-section capsule from that digest, and the next session's first turn receives it as context, once. An agent that never starts fresh drags every past turn into every future one; one that starts fresh with nothing repeats settled work. This is the third option.

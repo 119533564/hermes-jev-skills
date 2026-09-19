@@ -67,12 +67,25 @@ def is_trigger(text: Any) -> bool:
 # ── reading the conversation ─────────────────────────────────────────────────
 
 def _hermes_bin() -> List[str]:
-    """Prefer the venv's own CLI; the packaged command is the stable contract, not internals."""
-    venv = home() / "hermes-agent" / "venv" / "bin" / "hermes"
-    if venv.exists():
-        return [str(venv)]
-    for candidate in home().glob("hermes-agent/venv*/bin/hermes"):
-        return [str(candidate)]
+    """The packaged CLI is the stable contract; internals are not.
+
+    HERMES_HOME may point at a PROFILE (that is how per-profile state is addressed), but
+    the interpreter lives under the installation root. Look in both, and let
+    ``HERMES_CLI`` override when an install puts it somewhere else entirely.
+    """
+    override = os.environ.get("HERMES_CLI")
+    if override and Path(override).exists():
+        return [override]
+    roots = [home()]
+    parent = home().parent
+    if parent.name == "profiles":                      # <root>/profiles/<name> -> <root>
+        roots.append(parent.parent)
+    for root in roots:
+        direct = root / "hermes-agent" / "venv" / "bin" / "hermes"
+        if direct.exists():
+            return [str(direct)]
+        for candidate in sorted(root.glob("hermes-agent/venv*/bin/hermes")):
+            return [str(candidate)]
     return ["hermes"]
 
 
@@ -108,6 +121,41 @@ def export_messages(session_id: str, *, runner: Optional[Any] = None) -> List[Di
             if isinstance(content, str) and content.strip():
                 messages.append({"role": message["role"], "content": content.strip()})
     return messages
+
+
+def extract_text(response: Any) -> str:
+    """Pull the text out of whatever the host's LLM client returned.
+
+    Hosts differ: a plain string, an OpenAI-shaped dict, or a ``ChatCompletion``
+    object with attributes and no ``.get``. Assuming one shape is how the writer
+    silently failed and every capsule quietly became a raw transcript.
+    """
+    if response is None:
+        return ""
+    if isinstance(response, str):
+        return response
+    choices = None
+    if isinstance(response, Mapping):
+        choices = response.get("choices")
+    else:
+        choices = getattr(response, "choices", None)
+    if not choices:
+        # Some clients return the content directly on the object.
+        for attribute in ("content", "text", "output_text"):
+            value = getattr(response, attribute, None)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+    first = choices[0]
+    message = first.get("message") if isinstance(first, Mapping) else getattr(first, "message", None)
+    if message is None:
+        value = first.get("text") if isinstance(first, Mapping) else getattr(first, "text", None)
+        return value if isinstance(value, str) else ""
+    content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+    if isinstance(content, list):      # content-parts form
+        content = " ".join(str((p.get("text") if isinstance(p, Mapping) else getattr(p, "text", "")) or "")
+                           for p in content)
+    return content if isinstance(content, str) else ""
 
 
 # ── writing the capsule ──────────────────────────────────────────────────────
