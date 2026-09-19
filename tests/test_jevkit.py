@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jevkit import choose, client, compact, key_setup, keystore, privacy, rerank, route, skillpick  # noqa: E402
+from jevkit import choose, client, compact, key_setup, keystore, privacy, rerank, replay, route, skillpick  # noqa: E402
 
 KEY = "apikey_" + "a1" * 30
 
@@ -205,12 +205,18 @@ class KeySetupTests(unittest.TestCase):
         self.assertEqual(self.box["result"]["status"], "timed_out")
 
 
+def _row(provider, model, price, context, vision):
+    """input/output prices are what the replay harness costs a turn with."""
+    return {"provider": provider, "model": model, "price": price, "context": context, "vision": vision,
+            "input": price * 0.8, "output": price * 2.0}
+
+
 ROWS = [
-    {"provider": "or", "model": "cheap", "price": 0.2, "context": 100000, "vision": False},
-    {"provider": "or", "model": "mid", "price": 1.0, "context": 100000, "vision": True},
-    {"provider": "or", "model": "coder", "price": 1.2, "context": 100000, "vision": False},
-    {"provider": "or", "model": "big", "price": 9.0, "context": 1000000, "vision": True},
-    {"provider": "other", "model": "elsewhere", "price": 0.1, "context": 100000, "vision": False},
+    _row("or", "cheap", 0.2, 100000, False),
+    _row("or", "mid", 1.0, 100000, True),
+    _row("or", "coder", 1.2, 100000, False),
+    _row("or", "big", 9.0, 1000000, True),
+    _row("other", "elsewhere", 0.1, 100000, False),
 ]
 CONFIG = {**route.DEFAULT_CONFIG, "tiers": {
     "simple": {"general": ["other:elsewhere", "or:cheap"]},
@@ -483,3 +489,35 @@ class ChooseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplayTests(unittest.TestCase):
+    """The offline evaluation harness: a router you cannot measure is a guess."""
+
+    TURNS = [replay.Turn(prompt="rename foo to bar", current="or:mid", loop_calls=4),
+             replay.Turn(prompt="design the sync engine", current="or:mid", loop_calls=4)]
+
+    def test_costs_the_whole_tool_loop_not_one_call(self):
+        one = replay.loop_tokens(calls=1, start=8000, end=8000, output=700)
+        many = replay.loop_tokens(calls=8, start=8000, end=40000, output=700)
+        self.assertEqual(one, {"input": 8000, "output": 700})
+        self.assertGreater(many["input"], 10 * one["input"])   # the loop dominates the bill
+
+    def test_summary_prices_policy_against_baseline(self):
+        out = replay.replay(self.TURNS, config=CONFIG, rows=ROWS,
+                            decide=lambda prompt, **kw: route.decide(prompt, transport=jev_spread(
+                                {0: 0.95, 1: 0.05} if "rename" in prompt else {2: 0.5, 3: 0.5}), **kw))
+        s = out["summary"]
+        self.assertEqual(s["turns"], 2)
+        self.assertEqual(s["judged"], 2)
+        self.assertEqual(set(s["tier_mix"]), {"simple", "hard"})
+        self.assertIsNotNone(s["cost"]["delta_pct"])
+        self.assertLess(out["results"][0]["chosen"].dollars, out["results"][1]["chosen"].dollars)
+
+    def test_reads_turns_from_jsonl_and_skips_junk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.jsonl"
+            path.write_text('{"prompt":"a","session_id":"s1"}\n\nnot json\n{"prompt":"   "}\n{"content":"b"}\n')
+            turns = replay.turns_from_jsonl(str(path), current="or:mid")
+            self.assertEqual([t.prompt for t in turns], ["a", "b"])
+            self.assertEqual(turns[0].current, "or:mid")

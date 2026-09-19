@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 (2026-09-19)
+
+- **`jev replay`**: offline evaluation. Replays logged turns through a policy and prices it against the baseline those turns actually ran on, so "is this router worth it" is arithmetic instead of an opinion. Only Jev is called; a few hundred turns costs cents.
+- Costs the **whole tool loop**, not one call. A median agent turn here is 8 API calls and ~192k input / 5.6k output tokens — **97% input**. Ranking models by a blended price misranks them for agent work; rank by that real mix.
+- `jevkit.replay.compare` A/Bs several configs over the same turns. See [docs/measuring-a-router.md](docs/measuring-a-router.md).
+
 ## 0.2.5 (2026-09-19)
 
 Routing policy `route-2`. In shadow mode on a real 41-profile fleet, 89% of judged turns were sent to the hard tier. None of the three causes was the turns being hard:

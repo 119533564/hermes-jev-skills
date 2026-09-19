@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, rerank, route, skillpick
+from . import __version__, catalog, choose, client, compact, key_setup, keystore, rerank, replay, route, skillpick
 
 
 def _stdin_json() -> Any:
@@ -122,6 +122,17 @@ def cmd_choose(args: argparse.Namespace) -> int:
         raise SystemExit(f"invalid request: {error}") from None
 
 
+def cmd_replay(args: argparse.Namespace) -> int:
+    """Replay real turns through the policy and price the result against the baseline."""
+    turns = replay.turns_from_jsonl(args.turns, current=args.current, limit=args.limit)
+    if not turns:
+        raise SystemExit(f"no usable turns in {args.turns} (expect JSONL with a `prompt` field)")
+    out = replay.replay(turns, only_provider=args.only_provider, workers=args.workers)
+    if args.verbose:
+        return _out(out)
+    return _out(out["summary"])
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     """The model-routing page: per-profile models, an all-profiles target, the Jev switch and live decisions."""
     import os
@@ -205,6 +216,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("choose", help="pick the next GUI or browser action from a candidate table")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(func=cmd_choose)
+
+    p = sub.add_parser("replay", help="replay logged turns through the policy and price it against the baseline")
+    p.add_argument("turns", help="JSONL file, one object per turn with at least a `prompt` field")
+    p.add_argument("--current", help="the model these turns ran on, e.g. openrouter:deepseek/deepseek-v4.1-flash")
+    p.add_argument("--only-provider", help="restrict picks to one provider, as the Hermes plugin does")
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--verbose", action="store_true", help="include every per-turn decision, not just the summary")
+    p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("dashboard", help="open the model-routing page (models per profile, Jev switch, live decisions)")
     p.add_argument("--host", default="127.0.0.1", help="keep loopback unless you are on a private network; other hosts require a token")
