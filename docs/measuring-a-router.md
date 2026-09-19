@@ -72,3 +72,23 @@ Three things that only showed up in replay:
   every threshold change combined.
 - **Privacy-safe pools were cheaper**, not more expensive — the assumed trade-off was not real.
 - Raising the hard threshold from 0.6 to 0.75 halved the hard tier with no other change.
+
+## Measure the prize before you optimize
+
+Everything above is worthless if you have not answered "how much is being spent, on what?"
+Pull the invoice by key and by model before writing a line of routing config:
+
+- `openrouter.ai/activity/explore?metric=total_usage&dimension=model`
+- `openrouter.ai/activity/explore?metric=total_usage&dimension=api_key_id&subgroup=model`
+
+On the fleet this repo was built for, that took ten minutes and reordered every priority:
+
+- Three API keys were **99.9%** of a $278/month bill.
+- **57% of the bill was Claude models called at API rates** while a Claude Max subscription
+  sat unused. One escalation-ladder rung was worth more than every routing change combined.
+- The 41-profile agent fleet the router was written for spent **$0.127/month**. The router
+  was being tuned against three ten-thousandths of the bill.
+- Cache hit rate was **81.8%**, so switching models mid-session really does cost something —
+  the opposite of what the per-call price table suggests.
+
+None of that is visible from a price table, a benchmark, or a replay. Get the invoice first.
