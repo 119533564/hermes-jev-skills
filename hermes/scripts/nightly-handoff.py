@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
@@ -82,13 +81,6 @@ def live_sessions(db: Path, *, now: float, min_messages: int, within_s: float, l
     finally:
         conn.close()
     return rows
-
-
-def lane_for(session: Dict[str, Any]) -> str:
-    """Must match the plugin's lane_key, or the capsule lands where nobody reads it."""
-    parts = [str(session.get(k) or "") for k in ("source", "chat_id", "thread_id")]
-    key = ":".join(parts).strip(":") or str(session.get("id") or "default")
-    return re.sub(r"[^A-Za-z0-9._:-]", "_", key)[:120]
 
 
 def close_session(db: Path, session_id: str, *, now: float, reason: str) -> bool:
@@ -158,7 +150,10 @@ def main() -> int:
         log(f"{profile.name}: {len(sessions)} live session(s) to hand off")
         done: List[Dict[str, Any]] = []
         for session in sessions:
-            lane = lane_for(session)
+            # Deliberately the plugin's own function: two implementations of this rule
+            # would drift, and a capsule keyed differently from how it is read is a
+            # silent no-op that looks like the feature simply not working.
+            lane = ho.lane_key({**session, "session_id": session["id"]})
             entry = {"session": session["id"], "lane": lane, "messages": session["messages"]}
             if args.dry_run:
                 entry["action"] = "would hand off and close"

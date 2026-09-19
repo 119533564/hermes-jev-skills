@@ -1061,3 +1061,94 @@ class WriterResponseShapeTests(unittest.TestCase):
     def test_empty_shapes_return_empty_not_an_exception(self):
         for value in (None, {}, {"choices": []}, object(), 7):
             self.assertEqual(self.ho.extract_text(value), "")
+
+
+class LaneResolutionTests(unittest.TestCase):
+    """The writing hook and the injecting hook see different fields. If the lane key does
+    not survive that, the capsule is written and never read — a silent no-op."""
+
+    def setUp(self):
+        import importlib.util
+        root = Path(__file__).resolve().parents[1] / "hermes" / "plugin" / "hermes-handoff"
+        spec = importlib.util.spec_from_file_location("ho4", root / "handoff.py")
+        self.ho = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ho)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"HERMES_HOME": self.tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        db = Path(self.tmp.name) / "state.db"
+        conn = sqlite3.connect(db)
+        conn.execute("create table sessions (id text primary key, source text, chat_id text, thread_id text)")
+        conn.execute("insert into sessions values ('old-session','teams','chatA','1')")
+        conn.execute("insert into sessions values ('new-session','teams','chatA','1')")
+        conn.execute("insert into sessions values ('other','teams','chatB','1')")
+        conn.commit()
+        conn.close()
+
+    def test_a_platform_with_no_chat_id_does_not_collapse_every_chat_onto_one_key(self):
+        a = self.ho.lane_key({"platform": "teams", "session_id": "old-session"})
+        b = self.ho.lane_key({"platform": "teams", "session_id": "other"})
+        self.assertNotEqual(a, b, "two different conversations must not share a lane")
+        self.assertNotEqual(a, "teams")
+
+    def test_the_capsule_survives_the_session_rotation_it_was_written_for(self):
+        """Written against the old session, read from the new one — same conversation."""
+        # as the nightly script keys it, from a session row
+        written = self.ho.lane_key({"source": "teams", "chat_id": "chatA", "thread_id": "1",
+                                    "session_id": "old-session"})
+        read = self.ho.lane_key({"platform": "teams", "session_id": "new-session"})
+        self.assertEqual(written, read)
+
+    def test_an_unknown_session_falls_back_to_the_sender_not_the_platform(self):
+        lane = self.ho.lane_key({"platform": "teams", "session_id": "missing", "sender_id": "user-9"})
+        self.assertIn("user-9", lane)
+
+    def test_a_direct_chat_id_is_used_without_touching_the_store(self):
+        self.assertEqual(self.ho.lane_key({"platform": "teams", "chat_id": "chatZ", "thread_id": "3"}),
+                         "teams:chatZ:3")
+
+
+class LaneCollisionTests(unittest.TestCase):
+    """A truncated lane key hands one customer's capsule to another. Real Teams
+    conversation ids are 131 characters and share a structural prefix."""
+
+    def setUp(self):
+        import importlib.util
+        root = Path(__file__).resolve().parents[1] / "hermes" / "plugin" / "hermes-handoff"
+        spec = importlib.util.spec_from_file_location("ho5", root / "handoff.py")
+        self.ho = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ho)
+
+    def test_two_conversations_differing_only_at_the_end_do_not_collide(self):
+        shared = "a:1" + "X" * 200
+        a = self.ho.lane_key({"source": "teams", "chat_id": shared + "AAA", "thread_id": "1"})
+        b = self.ho.lane_key({"source": "teams", "chat_id": shared + "BBB", "thread_id": "1"})
+        self.assertNotEqual(a, b)
+        self.assertLessEqual(len(a), self.ho.LANE_MAX)
+
+    def test_the_same_conversation_always_produces_the_same_key(self):
+        args = {"source": "teams", "chat_id": "a:1" + "Y" * 200, "thread_id": "7"}
+        self.assertEqual(self.ho.lane_key(dict(args)), self.ho.lane_key(dict(args)))
+
+    def test_short_keys_stay_readable_and_unhashed(self):
+        self.assertEqual(self.ho.lane_key({"source": "teams", "chat_id": "chatA", "thread_id": "1"}),
+                         "teams:chatA:1")
+
+    def test_a_long_key_keeps_a_readable_prefix(self):
+        lane = self.ho.lane_key({"source": "teams", "chat_id": "a:1" + "Z" * 200, "thread_id": "1"})
+        self.assertTrue(lane.startswith("teams:a:1"))
+        self.assertLessEqual(len(lane), self.ho.LANE_MAX)
+
+    def test_a_hostile_conversation_id_cannot_escape_the_handoff_directory(self):
+        """The property that matters is containment, not the absence of dots."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}):
+                root = self.ho.handoff_dir().resolve()
+                for chat in ("a/b\\c", "../../etc/passwd", "..", "x" * 300, "réunion",
+                             "/absolute/path", "a\x00b"):
+                    lane = self.ho.lane_key({"source": "teams", "chat_id": chat})
+                    self.assertLessEqual(len(lane), self.ho.LANE_MAX)
+                    for path in (self.ho.capsule_path(lane), self.ho.pending_path(lane)):
+                        self.assertEqual(path.resolve().parent, root, f"escaped for {chat!r}")

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1 (2026-09-19)
+
+Two bugs found by testing a live deployment, both of which fail silently — the feature simply appears not to work.
+
+- **The lane key did not survive the hop it exists for.** The hook that writes a capsule receives `chat_id`; the hook that injects it receives `platform` and `sender_id` and *not* `chat_id`. Every conversation therefore resolved to the same key on the reading side, and no capsule would ever have matched. `lane_from_session()` now resolves the conversation from the session store, which both sides can reach, and the nightly script calls the plugin's own `lane_key` instead of carrying a second copy of the rule.
+- **Truncated lane keys could collide.** Real Teams conversation ids are 131 characters and share a structural prefix, so a 120-character truncation made uniqueness a matter of luck — and a collision hands one customer's capsule to another. Long keys now keep a readable prefix plus a hash of the full key. Containment inside the handoff directory is asserted against hostile ids rather than inferred.
+
 ## 0.7.0 (2026-09-19)
 
 - **`hermes/scripts/nightly-handoff.py`** — close every live conversation once a night and leave tomorrow a capsule. Written for a deployment where one conversation had reached 2,255 messages and seventeen days, re-sent in full on every turn. Conservative by construction: only sessions with recent activity and real content, capped per profile, `--dry-run` touches nothing, and **a session is only closed after its capsule is safely written** — losing the thread is worse than a large context.

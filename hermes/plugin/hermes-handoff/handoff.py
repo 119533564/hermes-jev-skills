@@ -16,6 +16,7 @@ to read but loses nothing.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,11 +42,74 @@ def handoff_dir() -> Path:
     return path
 
 
+LANE_MAX = 120
+
+
+def _clean(key: str) -> str:
+    """A filesystem-safe lane key that cannot collide.
+
+    Conversation ids are long — Teams' run to 131 characters — so a plain truncation
+    would make two conversations share a lane whenever they agree on their first N
+    characters. That is not a cosmetic bug: the capsule from one customer's conversation
+    would be handed to another. Past the limit, keep a readable prefix and let a hash of
+    the FULL key carry the identity.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._:-]", "_", key)
+    if len(safe) <= LANE_MAX:
+        return safe
+    fingerprint = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:20]
+    return f"{safe[:LANE_MAX - len(fingerprint) - 1]}-{fingerprint}"
+
+
+def lane_from_session(session_id: str, *, state_db: Optional[Path] = None) -> Optional[str]:
+    """Look the conversation up by session id.
+
+    The hook that writes a capsule and the hook that injects it do not receive the same
+    fields — ``pre_llm_call`` gets ``platform`` and ``sender_id`` but not ``chat_id``. A
+    capsule keyed on one and read with the other never matches, and the feature fails
+    silently. The session store has the conversation identity for both, so ask it.
+    """
+    if not session_id:
+        return None
+    db = state_db or (home() / "state.db")
+    if not db.is_file():
+        return None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+        columns = {r[1] for r in conn.execute("pragma table_info(sessions)")}
+        wanted = [c for c in ("source", "chat_id", "thread_id") if c in columns]
+        if not wanted:
+            conn.close()
+            return None
+        row = conn.execute(f"select {', '.join(wanted)} from sessions where id=?", (session_id,)).fetchone()
+        conn.close()
+    except Exception:  # noqa: BLE001
+        return None
+    if not row:
+        return None
+    key = ":".join(str(v or "") for v in row).strip(":")
+    return _clean(key) if key else None
+
+
 def lane_key(context: Mapping[str, Any]) -> str:
     """Stable per-conversation key. One capsule per conversation, not per session id."""
-    parts = [str(context.get(k) or "") for k in ("platform", "chat_id", "thread_id")]
-    key = ":".join(parts).strip(":") or str(context.get("session_id") or "default")
-    return re.sub(r"[^A-Za-z0-9._:-]", "_", key)[:120]
+    # `platform` is what the hooks call it; `source` is what the session store calls it.
+    # One conversation must produce one key whichever side is asking.
+    platform = str(context.get("platform") or context.get("source") or "")
+    parts = [platform, str(context.get("chat_id") or ""), str(context.get("thread_id") or "")]
+    direct = ":".join(parts).strip(":")
+    # A platform with no conversation id is not an identity — every chat would collapse
+    # onto one key. Resolve it from the session store instead.
+    if not context.get("chat_id"):
+        resolved = lane_from_session(str(context.get("session_id") or ""))
+        if resolved:
+            return resolved
+        sender = str(context.get("sender_id") or "")
+        if sender:
+            direct = ":".join(p for p in (parts[0], sender) if p)
+    key = direct or str(context.get("session_id") or "default")
+    return _clean(key)
 
 
 def capsule_path(lane: str) -> Path:
