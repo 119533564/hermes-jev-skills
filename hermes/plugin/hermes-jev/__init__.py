@@ -143,7 +143,7 @@ def _on_llm_request(request: Optional[Dict[str, Any]] = None, session_id: str = 
         default_bare = str(default).split(":", 1)[-1] if default else ""
         messages = request.get("messages") or request.get("input") or []
         decision = route.decide(
-            turn["text"], current=current, profile=_profile(), only_provider=catalog_provider,
+            turn["text"], current=current, profile=_profile(), only_provider=catalog_provider, session_id=session_id,
             context_tokens=len(json.dumps(messages, default=str)) // 4,
             has_images="image_url" in json.dumps(messages[-1:], default=str),
             pinned=bool(default_bare) and bare != default_bare)   # you ran /model: your choice wins

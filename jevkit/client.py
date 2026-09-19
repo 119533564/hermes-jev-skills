@@ -116,7 +116,15 @@ def _check_answer(name: str, question: Mapping[str, Any], answer: Any) -> Dict[s
         raise JevError("malformed", f"answer {name} has no numeric score")
     if not -0.5 <= float(value) <= levels - 0.5:
         raise JevError("malformed", f"answer {name} scored off the rubric")
-    return {"type": "score", "score": float(value),
+    # The per-level spread says far more than the averaged score: an unsure answer averages to
+    # the middle of the rubric, which looks like a real "medium-hard" unless you read the spread.
+    raw = answer.get("probabilities")
+    spread = {}
+    if isinstance(raw, dict):
+        for key, probability in raw.items():
+            if str(key).isdigit() and int(key) < levels:
+                spread[int(key)] = _unit(probability, f"{name}.p[{key}]")
+    return {"type": "score", "score": float(value), "probabilities": spread,
             "confidence": _unit(answer.get("confidence", 1.0), f"{name}.confidence")}
 
 

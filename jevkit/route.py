@@ -20,7 +20,7 @@ from . import client, privacy
 
 TIERS = ("simple", "medium", "hard")
 SPECIALTIES = ("general", "coding", "writing", "research", "vision")
-POLICY_VERSION = "route-1"
+POLICY_VERSION = "route-2"
 
 DIFFICULTY = [
     "Trivial or mechanical: a lookup, reformat, rename, short factual reply, or a single obvious step",
@@ -46,6 +46,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mode": "redacted-text",          # or "features": no prompt text ever leaves the machine
     "min_confidence": 0.6,
     "simple_needs_confidence": 0.85,
+    "hard_needs_probability": 0.6,    # P(substantial or expert) needed before paying for the hard tier
+    "simple_needs_probability": 0.7,  # P(trivial) needed before dropping to the cheapest tier
+    "ask_chars": 2500,                # how much of a long turn Jev reads: the opening and, mostly, the end
+    # Turns that are a template wrapped around work Jev cannot see. Routing them is a coin toss, so they keep
+    # the model their profile or job was configured with.
+    "skip_prefixes": ["[kanban]", "[SESSION HANDOFF", "[cron]", "[scheduled]"],
+    "skip_session_prefixes": ["cron"],
     "sticky_context_tokens": 32000,   # above this, do not downgrade: the cache rebuild costs more than it saves
     "exclude": ["*:free", "cloudflare-ai-gateway:*"],
     "private_profiles": [],
@@ -157,7 +164,7 @@ def decide(
     prompt: str, *, current: Optional[str] = None, context_tokens: int = 0, has_images: bool = False,
     profile: Optional[str] = None, pinned: bool = False, config: Optional[Dict[str, Any]] = None,
     rows: Optional[List[Dict[str, Any]]] = None, transport: Optional[client.Transport] = None,
-    timeout: float = 2.5, only_provider: Optional[str] = None,
+    timeout: float = 2.5, only_provider: Optional[str] = None, session_id: str = "",
 ) -> Dict[str, Any]:
     """Route one fresh user turn. Call it once per turn, never inside a tool loop."""
     config = config or load_config()
@@ -165,15 +172,23 @@ def decide(
         return _keep(current, "you pinned this model")
     if not (config.get("tiers") or {}):
         return _keep(current, "no tiers configured; run `jev models suggest --write`")
+    head = prompt.lstrip()[:80]
+    if any(head.startswith(prefix) for prefix in config.get("skip_prefixes") or []) or \
+            any(str(session_id).startswith(prefix) for prefix in config.get("skip_session_prefixes") or []):
+        return _keep(current, "automated turn; keeps its configured model")
     if not prompt.strip():
         return _keep(current, "empty turn")
 
-    risky = bool(_HARD_RISK.search(privacy.normalize(prompt)))
-    private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(prompt)
+    # Judge the ask, not the boilerplate around it. A long turn is mostly standing instructions; what is
+    # being asked for sits at the start and, far more often, at the end.
+    limit = int(config.get("ask_chars", 2500))
+    ask = prompt if len(prompt) <= limit else prompt[:limit // 4] + "\n[…]\n" + prompt[-(limit - limit // 4):]
+    risky = bool(_HARD_RISK.search(privacy.normalize(ask)))
+    private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(ask)
     mode = "features" if private else config.get("mode", "redacted-text")
     state: Any = (
-        {"turn_features": _features(prompt, context_tokens)} if mode == "features"
-        else {"user_turn": privacy.redact(prompt, 3000), "context": _features(prompt, context_tokens)["context"]}
+        {"turn_features": _features(ask, context_tokens)} if mode == "features"
+        else {"user_turn": privacy.redact(ask, limit + 50), "context": _features(ask, context_tokens)["context"]}
     )
     questions = {
         "difficulty": client.score("How demanding is it to complete this turn well?", DIFFICULTY),
@@ -188,17 +203,30 @@ def decide(
     answers = reply["answers"]
     difficulty, confidence = answers["difficulty"]["score"], answers["difficulty"]["confidence"]
     stakes = answers["costly_mistake"]["noul"]
+    spread = answers["difficulty"].get("probabilities") or {}
+    if spread:
+        p_simple, p_hard = spread.get(0, 0.0), spread.get(2, 0.0) + spread.get(3, 0.0)
+    else:                      # no spread returned: fall back to the averaged score, conservatively
+        p_simple, p_hard = float(difficulty < 0.5), float(difficulty >= 2.25)
+
+    # An unsure answer is not evidence of a hard turn. Its averaged score lands mid-rubric by arithmetic,
+    # so it must never buy the expensive tier: a harmless unsure turn stays put, a risky one gets medium.
     unsure = confidence < config["min_confidence"]
     if unsure and not (risky or stakes > 0.6):
         return _keep(current, f"low confidence {confidence:.2f}", private=private)
 
-    tier = "simple" if difficulty < 0.75 else "medium" if difficulty < 1.75 else "hard"
     if unsure:
-        tier = "medium" if tier == "simple" else tier   # unsure about a risky turn: never stay on the cheapest model
-    if tier == "simple" and (risky or stakes > 0.4 or confidence < config["simple_needs_confidence"] or mode == "features"):
-        tier = "medium"   # a short prompt is not proof of an easy task
-    if stakes > 0.85 or (risky and difficulty >= 1.5):
+        tier = "medium"
+    elif p_hard >= config["hard_needs_probability"]:
         tier = "hard"
+    elif p_simple >= config["simple_needs_probability"] and confidence >= config["simple_needs_confidence"]:
+        tier = "simple"
+    else:
+        tier = "medium"
+    if tier == "simple" and (risky or stakes > 0.4 or mode == "features"):
+        tier = "medium"        # risk words and costly mistakes set a floor of medium; they do not buy hard
+    if not unsure and stakes > 0.85 and p_hard >= 0.35:
+        tier = "hard"          # a costly mistake tips a turn that is already leaning hard
     kind = answers["kind"]
     specialty = kind["choice"] if kind["confidence"] >= 0.5 else "general"
 

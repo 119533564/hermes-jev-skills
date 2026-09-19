@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.5 (2026-09-19)
+
+Routing policy `route-2`. In shadow mode on a real 41-profile fleet, 89% of judged turns were sent to the hard tier. None of the three causes was the turns being hard:
+
+- **An unsure Score averages to the middle of the rubric**, which sat on the hard cutoff. The router now reads the per-level probabilities Jev returns: hard needs P(substantial or expert) of 0.6, simple needs P(trivial) of 0.7. An unsure answer never buys the hard tier: a harmless unsure turn keeps its model, a risky one gets medium.
+- **Risk words set a floor of medium and no more.** They used to escalate to hard.
+- **Jev judges the ask, not the boilerplate.** A long turn is read as its opening plus, mostly, its end (`ask_chars`, 2500), and the risk-word check runs on that same slice.
+- **Template turns are not routed**: `skip_prefixes` (`[kanban]`, `[SESSION HANDOFF`, …) and `skip_session_prefixes` (`cron`). They wrap work Jev cannot see, so they keep the model their profile or job was configured with.
+
+Replayed on 400 real turns: 316 template turns untouched, 48 unsure turns kept, 36 judged as 8 simple / 10 medium / 18 hard. The hard tier went from 89% of turns to 4.5%.
+
 ## 0.2.4 (2026-09-19)
 
 - The routing middleware no longer double-prefixes an already-prefixed model id (`openrouter:openrouter:…`), and the "you pinned this model" check now compares bare model ids on both sides. A prefixed model id used to look pinned-or-not by accident; the check is now format-independent.

@@ -53,8 +53,11 @@ Use `model_id` from the reply. `routed: false` means stay where you are; `reason
 
 ## Guarantees you can rely on
 
-- Risk words (production, delete, migration, security, payment, legal…) never route to `simple`, however short the prompt.
-- Unsure about a risky turn: goes up a tier. Unsure about a harmless one: stays on the current model.
+- Hard is earned: it needs real probability mass on "substantial" or "expert" (0.6 by default), read from the per-level spread Jev returns, never from an averaged score.
+- Unsure is not hard. An unsure answer about a harmless turn keeps the current model; about a risky turn it picks medium.
+- Risk words (production, delete, migration, security, payment, legal…) set a floor of medium, however short the prompt. They do not buy the hard tier on their own.
+- Jev judges the ask: a long turn is read as its opening plus, mostly, its end (`ask_chars`). Boilerplate in the middle is not what gets scored.
+- Template turns are not routed: anything starting with a `skip_prefixes` entry (`[kanban]`, `[SESSION HANDOFF`…) or from a `skip_session_prefixes` session (`cron`) keeps the model its profile or job was configured with.
 - Large context (over ~32k tokens): never switches to a cheaper model, because rebuilding the prompt cache costs more than it saves.
 - Turns that look like they contain secrets, and any profile listed in `private_profiles`, send Jev only coarse features (length, code present, risk words), never text.
 - Jev down, slow (2.5 s budget) or malformed: current model, no delay beyond the budget.

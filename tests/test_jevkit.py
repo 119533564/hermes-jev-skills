@@ -276,6 +276,58 @@ class RouteTests(unittest.TestCase):
         self.assertNotIn("Jane", json.dumps(transport.calls[0]["request"]))
 
 
+def jev_spread(spread, confidence=0.9, stakes=0.05, kind="general"):
+    """A reply that carries the per-level probabilities, as the real API does."""
+    average = sum(level * p for level, p in spread.items())
+
+    def answer(name, question, state):
+        if name == "difficulty":
+            return {"type": "score", "score": average, "confidence": confidence,
+                    "probabilities": {str(k): v for k, v in spread.items()}}
+        if name == "kind":
+            return {"type": "choice", "choice": kind, "confidence": 0.9, "probabilities": {kind: 0.9}}
+        return {"type": "noul", "noul": stakes}
+    return fake(answer)
+
+
+class RoutePolicyTests(unittest.TestCase):
+    """Regression: in shadow mode 89% of a real fleet's turns were sent to the hard tier."""
+
+    def decide(self, prompt, transport, **kw):
+        return route.decide(prompt, current="or:mid", config=CONFIG, rows=ROWS, transport=transport, **kw)
+
+    def test_an_unsure_mid_rubric_score_never_buys_the_hard_tier(self):
+        flat = {0: 0.25, 1: 0.25, 2: 0.25, 3: 0.25}          # averages to 1.5: looks "hard-ish", means "no idea"
+        risky = self.decide("check the production deploy", jev_spread(flat, confidence=0.3, stakes=0.8))
+        self.assertEqual(risky["tier"], "medium")
+        harmless = self.decide("hmm what about that", jev_spread(flat, confidence=0.3, stakes=0.1))
+        self.assertFalse(harmless["routed"])
+
+    def test_hard_needs_real_probability_mass_not_an_average(self):
+        self.assertEqual(self.decide("x", jev_spread({1: 0.55, 2: 0.45}))["tier"], "medium")   # average 1.45
+        self.assertEqual(self.decide("x", jev_spread({1: 0.3, 2: 0.4, 3: 0.3}))["tier"], "hard")
+
+    def test_risk_words_set_a_floor_of_medium_and_no_more(self):
+        self.assertEqual(self.decide("restart the production server", jev_spread({0: 0.9, 1: 0.1}))["tier"], "medium")
+
+    def test_template_turns_keep_their_configured_model_without_calling_jev(self):
+        transport = jev_spread({3: 1.0})
+        for prompt, session in (("[kanban] you are assigned task t_1", ""), ("run the nightly report", "cron_abc_20260918")):
+            decision = self.decide(prompt, transport, session_id=session)
+            self.assertFalse(decision["routed"])
+            self.assertIn("automated", decision["reason"])
+        self.assertEqual(transport.calls, [])
+
+    def test_boilerplate_in_the_middle_of_a_long_turn_is_not_what_gets_judged(self):
+        boilerplate = "Standing rules: production security payment migration contract. " * 400
+        transport = jev_spread({0: 0.95, 1: 0.05}, confidence=0.95)
+        decision = self.decide("Context follows.\n" + boilerplate + "\nWhat day is it today?", transport)
+        sent = json.dumps(transport.calls[0]["request"])
+        self.assertLess(len(sent), 4500)
+        self.assertIn("What day is it today?", sent)
+        self.assertIn(decision["tier"], ("simple", "medium"))
+
+
 class RouteConfigTests(unittest.TestCase):
     def test_shared_file_is_the_default_and_a_profile_overrides_one_tier(self):
         with tempfile.TemporaryDirectory() as tmp:
