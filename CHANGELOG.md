@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 (2026-09-19)
+
+- **`jev spend`** — the weekly cost report. What ran, what it cost, and what the same tokens would have cost on every alternative. Two things it exists to fix: a flat-fee seat looks free at the margin and so vanishes from cost reports (it is valued here at what its work would have cost metered, and told to earn its keep or be cancelled), and a per-token price is not a per-task price. The effective $/M column also exposes prompt caching, which the headline price hides.
+- Counterfactuals are honest about their limit: they price the tokens that were actually produced, so a model that reasons more or less would not have produced the same ones. Stated in the output, not just the docs.
+
 ## 0.4.0 (2026-09-19)
 
 Frontier work: pick the seat, then watch the run.

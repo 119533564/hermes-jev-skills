@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import sqlite3
 import tempfile
 import threading
 import time
@@ -14,7 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jevkit import (choose, client, compact, key_setup, keystore, ladder, privacy,  # noqa: E402
-                    rerank, replay, route, skillpick, supervise)
+                    rerank, replay, route, skillpick, spend, supervise)
 
 KEY = "apikey_" + "a1" * 30
 
@@ -804,3 +805,82 @@ class SecretNameTests(unittest.TestCase):
         out = privacy.redact("export AWS_SECRET_ACCESS_KEY=abcdefghij1234567890")
         self.assertIn("AWS_SECRET_ACCESS_KEY=[secret]", out)
         self.assertNotIn("abcdefghij", out)
+
+
+class SpendTests(unittest.TestCase):
+    """A flat-fee seat looks free at the margin; a per-token price is not a per-task price."""
+
+    PRICES = {"or:cheap": {"input": 0.10, "output": 0.30},
+              "or:dear": {"input": 3.00, "output": 12.00},
+              "or:frontier": {"input": 9.00, "output": 45.00}}
+    ROWS = [spend.Usage("or:cheap", requests=100, input_tokens=10_000_000, output_tokens=500_000,
+                        cost_usd=1.15, label="lane-a"),
+            spend.Usage("or:dear", requests=10, input_tokens=1_000_000, output_tokens=100_000,
+                        cost_usd=4.20, label="lane-b")]
+
+    def test_counterfactual_prices_the_same_tokens_everywhere(self):
+        out = spend.counterfactuals(self.ROWS, ["or:cheap", "or:dear"], prices=self.PRICES)
+        self.assertEqual(out[0]["model"], "or:cheap")                 # sorted cheapest first
+        self.assertAlmostEqual(out[0]["cost_usd"], 11_000_000 * 0.10 / 1e6 + 600_000 * 0.30 / 1e6, places=4)
+        self.assertGreater(out[1]["cost_usd"], out[0]["cost_usd"])
+
+    def test_an_unknown_model_is_reported_not_silently_dropped(self):
+        out = spend.counterfactuals(self.ROWS, ["or:nonexistent"], prices=self.PRICES)
+        self.assertIsNone(out[0]["cost_usd"])
+        self.assertIn("catalogue", out[0]["note"])
+
+    def test_a_seat_is_valued_at_what_its_work_would_have_cost_metered(self):
+        rows = self.ROWS + [spend.Usage("subscription:frontier", requests=50, input_tokens=5_000_000,
+                                        output_tokens=250_000, cost_usd=0.0, source="subscription", seat="Max")]
+        seats = [spend.Seat("Max", monthly_usd=200.0, market_equivalent="or:frontier")]
+        out = spend.seat_value(rows, seats, prices=self.PRICES, days=7)[0]
+        self.assertAlmostEqual(out["fee_for_window_usd"], round(200 * 7 / 30, 2), places=2)
+        self.assertAlmostEqual(out["market_value_usd"], round(5_000_000 * 9.0 / 1e6 + 250_000 * 45.0 / 1e6, 2), places=2)
+        self.assertEqual(out["verdict"], "earning its keep")
+        self.assertGreater(out["net_usd"], 0)
+
+    def test_an_unused_seat_is_called_out(self):
+        seats = [spend.Seat("Idle", monthly_usd=200.0, market_equivalent="or:frontier")]
+        out = spend.seat_value(self.ROWS, seats, prices=self.PRICES, days=7)[0]
+        self.assertTrue(out["verdict"].startswith("unused"))
+        self.assertEqual(out["tokens"], 0)
+
+    def test_a_seat_that_costs_more_than_it_saves_says_so(self):
+        rows = [spend.Usage("subscription:tiny", requests=1, input_tokens=1000, output_tokens=100,
+                            cost_usd=0.0, source="subscription", seat="Max")]
+        seats = [spend.Seat("Max", monthly_usd=200.0, market_equivalent="or:frontier")]
+        out = spend.seat_value(rows, seats, prices=self.PRICES, days=7)[0]
+        self.assertEqual(out["verdict"], "costing more than it saves")
+        self.assertLess(out["net_usd"], 0)
+
+    def test_report_totals_seats_and_metered_together(self):
+        seats = [spend.Seat("Max", monthly_usd=200.0, market_equivalent="or:frontier")]
+        data = spend.report(self.ROWS, candidates=["or:cheap"], seats=seats, days=7, prices=self.PRICES)
+        self.assertAlmostEqual(data["spend"]["metered_usd"], 5.35, places=2)
+        self.assertAlmostEqual(data["spend"]["subscription_fees_usd"], 46.67, places=2)
+        self.assertAlmostEqual(data["spend"]["total_usd"], 52.02, places=2)
+        self.assertEqual([e["lane"] for e in data["by_lane"]], ["lane-b", "lane-a"])   # by cost
+        self.assertIn("unused", data["verdict"])
+
+    def test_effective_rate_reveals_caching(self):
+        """A rate well under list price is the cache working — the headline price hides it."""
+        data = spend.report(self.ROWS, prices=self.PRICES)
+        cheap = next(e for e in data["by_model"] if e["model"] == "or:cheap")
+        self.assertEqual(cheap["tokens_per_request"], round(10_500_000 / 100))
+        self.assertLess(cheap["per_m_effective"], 0.20)
+
+    def test_render_is_readable_and_carries_the_caveat(self):
+        text = spend.render(spend.report(self.ROWS, candidates=["or:cheap", "or:dear"], prices=self.PRICES))
+        self.assertIn("Spend over", text)
+        self.assertIn("if the same tokens had run entirely on", text)
+        self.assertIn("floor, not a promise", text)
+
+    def test_hermes_collector_tolerates_a_db_without_the_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.db"
+            conn = sqlite3.connect(path)
+            conn.execute("create table messages (id integer primary key, role text, timestamp real)")
+            conn.commit()
+            conn.close()
+            self.assertEqual(spend.from_hermes_sessions(str(path)), [])
+        self.assertEqual(spend.from_hermes_sessions("/nonexistent/state.db"), [])

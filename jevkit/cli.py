@@ -8,10 +8,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, rerank, replay, route, skillpick, supervise
+from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, rerank, replay, route, skillpick, spend, supervise
 
 
 def _stdin_json() -> Any:
@@ -125,6 +126,24 @@ def cmd_choose(args: argparse.Namespace) -> int:
 def _rungs(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     settings = (config or route.load_config()).get("escalation") or {}
     return list(settings.get("rungs") or [])
+
+
+def cmd_spend(args: argparse.Namespace) -> int:
+    """What the window cost, and what it would have cost on every alternative."""
+    rows: List[spend.Usage] = []
+    for path in args.usage or []:
+        rows += spend.from_json(path)
+    for db in args.hermes_db or []:
+        rows += spend.from_hermes_sessions(db, since=time.time() - args.days * 86400,
+                                           label=Path(db).parent.name)
+    if not rows:
+        raise SystemExit("no usage: pass --usage <export.json> and/or --hermes-db <state.db>")
+    seats = [spend.Seat(**s) for s in json.loads(Path(args.seats).read_text(encoding="utf-8"))] if args.seats else []
+    data = spend.report(rows, candidates=args.compare or [], seats=seats, days=args.days)
+    if args.json:
+        return _out(data)
+    sys.stdout.write(spend.render(data) + "\n")
+    return 0
 
 
 def cmd_ladder(args: argparse.Namespace) -> int:
@@ -252,6 +271,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("choose", help="pick the next GUI or browser action from a candidate table")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(func=cmd_choose)
+
+    p = sub.add_parser("spend", help="weekly cost report: what ran, what it cost, what would have been cheaper")
+    p.add_argument("--usage", action="append", help="JSON export of metered usage rows (repeatable)")
+    p.add_argument("--hermes-db", action="append", help="Hermes state.db, to value subscription work (repeatable)")
+    p.add_argument("--compare", action="append", help="model id to price the same tokens against (repeatable)")
+    p.add_argument("--seats", help="JSON list of flat-fee seats: name, monthly_usd, market_equivalent")
+    p.add_argument("--days", type=float, default=7.0)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_spend)
 
     p = sub.add_parser("ladder", help="the frontier escalation ladder: who takes hard work, and who is full")
     p.add_argument("action", choices=["status", "choose", "refuse", "clear"])
