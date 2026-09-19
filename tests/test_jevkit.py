@@ -884,3 +884,106 @@ class SpendTests(unittest.TestCase):
             conn.close()
             self.assertEqual(spend.from_hermes_sessions(str(path)), [])
         self.assertEqual(spend.from_hermes_sessions("/nonexistent/state.db"), [])
+
+
+class HandoffCapsuleTests(unittest.TestCase):
+    """Jev selects what survives; a text model writes it. Neither does the other's job."""
+
+    def test_prompt_carries_the_digest_and_the_verbatim_rule(self):
+        prompt = compact.handoff_prompt("[KEEP VERBATIM] user: the port is 8791")
+        self.assertIn("## Working on", prompt)
+        self.assertIn("UNCHANGED", prompt)
+        self.assertIn("the port is 8791", prompt)
+
+    def test_a_previous_handoff_is_folded_in_and_bounded(self):
+        prompt = compact.handoff_prompt("new stuff", previous="## Pointers\nport 8791\n" + "x" * 9000)
+        self.assertIn("previous_handoff", prompt)
+        self.assertLess(len(prompt), 20000)
+
+    def test_capsule_detection_rejects_a_refusal_and_accepts_a_real_one(self):
+        self.assertFalse(compact.looks_like_capsule("I'm sorry, I can't help with that."))
+        self.assertFalse(compact.looks_like_capsule(""))
+        self.assertTrue(compact.looks_like_capsule(
+            "## Working on\nthe router\n## State\nshipped\n## Decisions\nkept shadow\n## Pointers\n/tmp/x\n## Next\ntest it"))
+
+
+class HandoffPluginTests(unittest.TestCase):
+    """The handoff module must work with no Jev key, no network, and no writer model."""
+
+    def setUp(self):
+        import importlib.util
+        root = Path(__file__).resolve().parents[1] / "hermes" / "plugin" / "hermes-handoff"
+        spec = importlib.util.spec_from_file_location("ho", root / "handoff.py")
+        self.ho = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ho)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"HERMES_HOME": self.tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_only_the_bare_word_triggers(self):
+        for yes in ("handoff", "  Handoff ", "hand off", "HAND-OFF", "handoff."):
+            self.assertTrue(self.ho.is_trigger(yes), yes)
+        for no in ("do a handoff for me", "handoff the ticket to Bob", "", None, 7,
+                   "what does handoff do?"):
+            self.assertFalse(self.ho.is_trigger(no), str(no))
+
+    def test_lane_key_is_per_conversation_and_filesystem_safe(self):
+        a = self.ho.lane_key({"platform": "telegram", "chat_id": "-100/5", "thread_id": "9"})
+        b = self.ho.lane_key({"platform": "telegram", "chat_id": "-100/5", "thread_id": "9"})
+        c = self.ho.lane_key({"platform": "telegram", "chat_id": "-100/5", "thread_id": "10"})
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+        self.assertNotIn("/", a)
+
+    def _messages(self, n=12):
+        return [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(n)]
+
+    def test_builds_a_capsule_and_marks_it_pending(self):
+        out = self.ho.build("s1", "lane", write=lambda p: "## Working on\nx\n## State\ny\n## Next\nz",
+                            valid=lambda t: "## Working on" in t,
+                            runner=lambda *a, **k: mock.Mock(returncode=0, stdout=json.dumps(
+                                {"messages": self._messages()})))
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("## Working on", Path(out["path"]).read_text())
+        self.assertEqual(self.ho.take_pending("lane")[:9], "# Handoff")
+
+    def test_a_pending_capsule_is_consumed_exactly_once(self):
+        self.ho.build("s1", "lane", write=lambda p: "## Working on\nx\n## State\ny\n## Next\nz",
+                      valid=lambda t: True,
+                      runner=lambda *a, **k: mock.Mock(returncode=0, stdout=json.dumps({"messages": self._messages()})))
+        self.assertIsNotNone(self.ho.take_pending("lane"))
+        self.assertIsNone(self.ho.take_pending("lane"), "a capsule must not be injected forever")
+
+    def test_a_refusing_writer_falls_back_to_the_transcript_rather_than_losing_it(self):
+        out = self.ho.build("s1", "lane", write=lambda p: "I'm sorry, I can't help with that.",
+                            valid=lambda t: "## Working on" in t and "sorry" not in t,
+                            runner=lambda *a, **k: mock.Mock(returncode=0, stdout=json.dumps({"messages": self._messages()})))
+        self.assertEqual(out["status"], "ok")
+        text = Path(out["path"]).read_text()
+        self.assertIn("did not return a usable handoff", text)
+        self.assertIn("turn 11", text)      # the content survived
+
+    def test_a_writer_that_raises_never_takes_the_session_down(self):
+        def boom(prompt):
+            raise RuntimeError("model exploded")
+        out = self.ho.build("s1", "lane", write=boom, valid=lambda t: False,
+                            runner=lambda *a, **k: mock.Mock(returncode=0, stdout=json.dumps({"messages": self._messages()})))
+        self.assertEqual(out["status"], "ok")
+
+    def test_a_short_session_is_not_worth_handing_off(self):
+        out = self.ho.build("s1", "lane", write=lambda p: "x",
+                            runner=lambda *a, **k: mock.Mock(returncode=0, stdout=json.dumps(
+                                {"messages": self._messages(2)})))
+        self.assertEqual(out["status"], "too_short")
+
+    def test_a_failed_export_is_survivable(self):
+        out = self.ho.build("s1", "lane", write=lambda p: "x",
+                            runner=lambda *a, **k: mock.Mock(returncode=1, stdout=""))
+        self.assertEqual(out["status"], "too_short")
+
+    def test_injection_labels_the_capsule_as_history_not_instruction(self):
+        text = self.ho.injection("## Working on\nthe router")
+        self.assertIn("not a new instruction", text)
+        self.assertIn("the router", text)

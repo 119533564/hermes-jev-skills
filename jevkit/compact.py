@@ -90,6 +90,50 @@ def digest(messages: Sequence[Mapping[str, Any]], selection: Mapping[str, Any], 
     return text if len(text) <= limit else text[-limit:]
 
 
+# The five headings a handoff needs. More than this and the next session reads an essay
+# instead of getting to work; fewer and it starts by rediscovering what was already decided.
+HANDOFF_SECTIONS = ("Working on", "State", "Decisions", "Pointers", "Next")
+
+HANDOFF_PROMPT = """Write a handoff so a fresh session can pick this work up cold.
+
+Use exactly these five headings, in this order, nothing before or after:
+## Working on
+## State
+## Decisions
+## Pointers
+## Next
+
+Rules:
+- Under 400 words total.
+- Every line marked [KEEP VERBATIM] carries a decision, a constraint, an exact value, a path,
+  an id, a command or an error. Carry those through UNCHANGED. Do not paraphrase them.
+- [background] lines only need their gist, at most a sentence or two of context.
+- Pointers means exact paths, ids, URLs, ports, branch names, commands. No prose there.
+- Next means what the following session should actually do first, concretely.
+- Write nothing you cannot support from the transcript below. No guessing, no filler,
+  no "the user seems to want". If something is unknown, say it is unknown.
+- Plain sentences. No bullets inside a section unless listing pointers.
+"""
+
+
+def handoff_prompt(digest_text: str, previous: str = "") -> str:
+    """The full prompt for whatever text model writes the capsule. Jev cannot write it."""
+    prompt = HANDOFF_PROMPT
+    if previous.strip():
+        prompt += ("\nA PREVIOUS handoff for this same work is below. Carry forward anything still "
+                   "true, especially Pointers, and fold in what has happened since. Do not lose "
+                   "identifiers.\n\n<previous_handoff>\n" + previous.strip()[-6000:] + "\n</previous_handoff>\n")
+    return prompt + "\n\nTRANSCRIPT (already filtered; read the markers):\n\n" + digest_text + "\n"
+
+
+def looks_like_capsule(text: str) -> bool:
+    """A cheap check that the writer produced a handoff and not an apology or a refusal."""
+    if not text or len(text.strip()) < 40:
+        return False
+    found = sum(1 for heading in HANDOFF_SECTIONS if f"## {heading}" in text)
+    return found >= 3
+
+
 def should_compact(used_tokens: int, window_tokens: int, *, soft: float = 0.6, hard: float = 0.85) -> Dict[str, Any]:
     """Pure arithmetic; no model needed to know the window is nearly full."""
     ratio = used_tokens / window_tokens if window_tokens else 0.0

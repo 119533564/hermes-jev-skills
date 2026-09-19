@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 (2026-09-19)
+
+- **`hermes-handoff` plugin** — say `handoff` (or `/handoff`) and the session closes deliberately: Jev marks which turns must survive word for word, the host's existing auxiliary model writes a five-section capsule from that digest, and the next session's first turn receives it as context, once. An agent that never starts fresh drags every past turn into every future one; one that starts fresh with nothing repeats settled work. This is the third option.
+- Degrades rather than fails at every step: no Jev key means every turn is background and the capsule is still written; a writer that refuses, times out or answers something else falls back to the filtered transcript, which reads worse but loses nothing; a writer that raises never takes the session down.
+- `jevkit.compact` gained `handoff_prompt()` and `looks_like_capsule()`. Jev still cannot write — it only decides what is worth writing about.
+
 ## 0.5.0 (2026-09-19)
 
 - **`jev spend`** — the weekly cost report. What ran, what it cost, and what the same tokens would have cost on every alternative. Two things it exists to fix: a flat-fee seat looks free at the margin and so vanishes from cost reports (it is valued here at what its work would have cost metered, and told to earn its keep or be cancelled), and a per-token price is not a per-task price. The effective $/M column also exposes prompt caching, which the headline price hides.
