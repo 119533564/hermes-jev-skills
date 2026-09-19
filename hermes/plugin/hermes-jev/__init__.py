@@ -135,14 +135,18 @@ def _on_llm_request(request: Optional[Dict[str, Any]] = None, session_id: str = 
     decision = turn["decision"]
     if decision is None:                       # first API call of this turn: ask Jev exactly once
         catalog_provider = catalog.HERMES_ALIASES.get(provider, provider)
-        current = f"{catalog_provider}:{model}"
+        # Some Hermes paths hand us an already-prefixed model id; normalising here keeps
+        # the decision string honest and keeps the pinned check comparing like with like.
+        bare = model.split(":", 1)[1] if model.startswith(f"{catalog_provider}:") else model
+        current = f"{catalog_provider}:{bare}"
         default = _default_model()
+        default_bare = str(default).split(":", 1)[-1] if default else ""
         messages = request.get("messages") or request.get("input") or []
         decision = route.decide(
             turn["text"], current=current, profile=_profile(), only_provider=catalog_provider,
             context_tokens=len(json.dumps(messages, default=str)) // 4,
             has_images="image_url" in json.dumps(messages[-1:], default=str),
-            pinned=bool(default) and model != default)   # you ran /model: your choice wins
+            pinned=bool(default_bare) and bare != default_bare)   # you ran /model: your choice wins
         turn["decision"] = decision
         _log({"kind": "route", "mode": mode, "from": current, **{k: decision.get(k) for k in (
             "routed", "model", "tier", "specialty", "confidence", "difficulty", "costly_mistake", "private",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4 (2026-09-19)
+
+- The routing middleware no longer double-prefixes an already-prefixed model id (`openrouter:openrouter:…`), and the "you pinned this model" check now compares bare model ids on both sides. A prefixed model id used to look pinned-or-not by accident; the check is now format-independent.
+- New `tests/test_plugin_middleware.py`: routes/prefixed/pinned/off/stale-turn cases against the real middleware with the Jev call stubbed (no network, no real log).
+
 ## 0.2.3 (2026-09-19)
 
 - **`jev-browser-use` path B actually runs now.** The runner required a CDP browser to already exist (`BU_CDP_WS` or a Chrome with remote debugging on) and simply failed on a machine without one. It now launches its own headless Chrome on a throwaway profile when no endpoint is given, closes it on exit, SIGINT and SIGTERM, and reports `browser: owned|attached`. `--no-launch-chrome`, `--chrome-path` and `BH_CHROME_PATH` control it. The person's everyday browser is never attached to.

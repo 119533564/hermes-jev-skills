@@ -213,11 +213,11 @@ class OwnedChrome:
         handle, log_name = tempfile.mkstemp(prefix="jev-browser-chrome-", suffix=".log")
         os.close(handle)
         self.log_path = Path(log_name)
-        log = open(self.log_path, "wb")  # noqa: SIM115 (kept open for the child's lifetime)
-        self.process = subprocess.Popen(
-            [self.chrome_path, *chrome_args(self.port, self.profile_dir, self.url)],
-            stdout=log, stderr=subprocess.STDOUT,
-        )
+        with open(self.log_path, "wb") as log:  # the child keeps its own descriptor
+            self.process = subprocess.Popen(
+                [self.chrome_path, *chrome_args(self.port, self.profile_dir, self.url)],
+                stdout=log, stderr=subprocess.STDOUT,
+            )
         websocket = wait_for_cdp(self.port, timeout=self.startup_timeout)
         if not websocket:
             tail = ""
