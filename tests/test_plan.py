@@ -530,9 +530,10 @@ def stored(home):
     return [entry["v"]["steps"] for entry in entries.values()]
 
 
-def poison(home, command, steps, at=None, **context):
+def poison(home, command, steps, at=None, loose=False, **context):
     """Write a cache entry by hand, as anything able to write to the cache directory could."""
-    key = P.cache_key(command, model=CREDS["model"], base_url=CREDS["base_url"], **context)
+    make = P.loose_cache_key if loose else P.cache_key
+    key = make(command, model=CREDS["model"], base_url=CREDS["base_url"], **context)
     cache_file(home).parent.mkdir(parents=True, exist_ok=True)
     cache_file(home).write_text(json.dumps({"schema": memo.SCHEMA, "entries": {
         key: {"at": time.time() if at is None else at, "v": {"steps": steps}}}}))
@@ -798,6 +799,220 @@ class PlanCacheTests(unittest.TestCase):
         for why, key in different.items():
             with self.subTest(different=why):
                 self.assertNotEqual(key, base)
+
+    def test_two_transcriptions_of_one_utterance_share_a_plan(self):
+        """These commands are dictated, and the exact key treats every transcription of one
+        sentence as a different command. Measured over 19 repeats of six spoken commands, it
+        hit once: 5%. A capital on the first word, a capital on an app name, the full stop
+        the engine adds and a doubled space were the rest (see DICTATED below)."""
+        said = "Switch to Notes and open a new window"
+        steps = [step("open_app", "Notes"), step("menu", "File > New Window")]
+        context = {"front_app": "Finder", "running_apps": ["Finder", "Notes", "Safari"]}
+        for again in ("switch to Notes and open a new window", "Switch to notes and open a new window",
+                      "Switch to Notes and open a new window.", "Switch to  Notes and open a new window",
+                      "  Switch to Notes and open a new window  "):
+            with self.subTest(again=again), cache("on"):
+                transport = Recorder(reply(steps))
+                first = P.plan(said, transport=transport, credentials=CREDS, **context)
+                second = P.plan(again, transport=transport, credentials=CREDS, **context)
+                self.assertEqual((len(transport.calls), second["cache"]), (1, "hit"))
+                self.assertEqual(second["steps"], first["steps"])
+
+    def test_a_doubled_space_inside_an_app_name_does_not_hide_that_the_app_is_running(self):
+        """The key asks whether the command NAMES a running app by looking the app's name up
+        in the command. That lookup was done on the raw characters, so the doubled space a
+        dictation engine puts between words -- the same variance the loose key exists for --
+        made "Switch to Visual  Studio  Code" not contain "visual studio code". The app went
+        unnamed, running or not stopped being part of the key, and the plan kept for the
+        machine where it was open (click it in the dock) was served to the machine where it
+        was not running at all."""
+        said = "Switch to Visual  Studio  Code"
+        running = {"front_app": "Finder", "running_apps": ["Finder", "Visual Studio Code"]}
+        with cache("on") as home:
+            first, _ = run(said, reply([step("click", "Visual Studio Code in the dock")]), **running)
+            second, sent = run(said, reply([step("open_app", "Visual Studio Code")]),
+                               front_app="Finder", running_apps=["Finder"])
+            self.assertEqual((second["cache"], len(sent.calls)), ("miss", 1))
+            self.assertEqual(second["steps"], [{"kind": "open_app", "target": "Visual Studio Code"}])
+            self.assertNotEqual(second["steps"], first["steps"])
+        with cache("on"):                       # and the same utterance, spaced either way, still shares
+            transport = Recorder(reply([step("click", "Visual Studio Code in the dock")]))
+            P.plan("Switch to Visual Studio Code", transport=transport, credentials=CREDS, **running)
+            again = P.plan(said, transport=transport, credentials=CREDS, **running)
+            self.assertEqual((len(transport.calls), again["cache"]), (1, "hit"))
+
+    # One spoken command, then the ways a dictation engine really re-transcribes it. The
+    # figure in docs/response-caches.md is this corpus, so it can be re-measured rather than
+    # taken on trust, and a change that quietly stops the cache hitting fails here.
+    DICTATED = (
+        ("Open Safari", [step("open_app", "Safari")],
+         ("open Safari", "Open safari", "Open Safari.", "Open  Safari", "  Open Safari  ")),
+        ("Switch to Visual Studio Code", [step("click", "Visual Studio Code in the dock")],
+         ("switch to visual studio code", "Switch to Visual  Studio  Code",
+          "Switch to Visual Studio Code.")),
+        ("Go to example.com and click the first result",
+         [step("open_url", "https://example.com"), step("click", "first result")],
+         ("go to example.com and click the first result", "Go to Example.com and click the first result",
+          "Go to example.com and click the first result.")),
+        ("Open Notes and write: call the plumber",
+         [step("open_app", "Notes"), step("type_text", "note body", "call the plumber")],
+         ("open Notes and write: call the plumber", "Open Notes and write: Call the plumber",
+          "Open Notes and write: call the plumber.")),
+        ("Scroll down three times", [step("scroll", "down", amount=3)],
+         ("scroll down three times", "Scroll down three times.")),
+        ("Go to example.com and search for tide tables",
+         [step("open_url", "https://example.com"), step("type_text", "search field", "tide tables"),
+          step("press_key", "return")],
+         ("go to example.com and search for tide tables", "Go to example.com and search for Tide Tables",
+          "Go to example.com and search for tide tables.")),
+    )
+    DICTATED_CONTEXT = {"front_app": "Finder",
+                        "running_apps": ["Finder", "Notes", "Safari", "Visual Studio Code"]}
+
+    def _hits(self, exact_only):
+        """(hits, misses, the re-transcriptions that missed) over DICTATED."""
+        hits, misses, missed = 0, 0, []
+        for said, steps, agains in self.DICTATED:
+            with cache("on"):
+                blind = mock.patch.object(P, "loose_cache_key", lambda *a, **k: "")
+                if exact_only:
+                    blind.start()
+                try:
+                    transport = Recorder(reply(steps))
+                    P.plan(said, transport=transport, credentials=CREDS, **self.DICTATED_CONTEXT)
+                    for again in agains:
+                        result = P.plan(again, transport=transport, credentials=CREDS,
+                                        **self.DICTATED_CONTEXT)
+                        if result["cache"] == "hit":
+                            hits += 1
+                        else:
+                            misses += 1
+                            missed.append(again)
+                finally:
+                    if exact_only:
+                        blind.stop()
+        return hits, misses, missed
+
+    def test_the_hit_rate_the_docs_quote_is_what_this_corpus_measures(self):
+        """0.14.0 shipped a cache nobody had measured. Keyed byte for byte on input that
+        arrives by dictation, it hit once in nineteen repeats of what the person had already
+        said: 5%, and the one hit was leading and trailing whitespace, which strip() had
+        already handled. Every other repeat was a second model call for a plan on disk."""
+        hits, misses, _ = self._hits(exact_only=True)
+        self.assertEqual((hits, misses), (1, 18))
+        self.assertEqual(round(100 * hits / (hits + misses)), 5)
+
+    def test_every_repeat_that_still_misses_is_one_that_carries_dictated_words(self):
+        """13 of 19, and the six that are left are the honest ones: each one dictates a note
+        or a search term, so its plan types the command's exact characters and cannot be
+        shared with another transcription without typing words nobody said."""
+        hits, misses, missed = self._hits(exact_only=False)
+        self.assertEqual((hits, misses), (13, 6))
+        self.assertEqual(round(100 * hits / (hits + misses)), 68)
+        for again in missed:
+            with self.subTest(again=again):
+                self.assertTrue("write:" in again or "search for" in again.lower())
+
+    def test_a_plan_that_copies_the_command_is_never_shared_across_transcriptions(self):
+        """Two fields are a copy of the command's exact characters: the text of a type_text,
+        which is typed character for character, and the path of an address, because /Docs
+        and /docs are different pages. Those plans stay on the exact key, so "write: Buy
+        milk" and "write: buy milk" remain the two different commands they are."""
+        cases = (
+            ("Open Notes and write: buy milk", [step("open_app", "Notes"), step("type_text", "note", "buy milk")],
+             "Open Notes and write: Buy milk", [step("open_app", "Notes"), step("type_text", "note", "Buy milk")]),
+            ("Open Notes and write: buy milk", [step("open_app", "Notes"), step("type_text", "note", "buy milk")],
+             "Open Notes and write: buy  milk", [step("open_app", "Notes"), step("type_text", "note", "buy  milk")]),
+            ("Go to example.com/Docs", [step("open_url", "https://example.com/Docs")],
+             "Go to example.com/docs", [step("open_url", "https://example.com/docs")]),
+            ("Go to example.com and search for tide tables",
+             [step("open_url", "https://example.com"), step("type_text", "search field", "tide tables"),
+              step("press_key", "return")],
+             "Go to example.com and search for Tide Tables",
+             [step("open_url", "https://example.com"), step("type_text", "search field", "Tide Tables"),
+              step("press_key", "return")]),
+        )
+        for said, said_steps, again, again_steps in cases:
+            with self.subTest(again=again), cache("on"):
+                first, _ = run(said, reply(said_steps))
+                second, sent = run(again, reply(again_steps))
+                self.assertEqual((second["cache"], len(sent.calls)), ("miss", 1))
+                self.assertNotEqual(second["steps"], first["steps"])
+
+    def test_a_loose_entry_that_copies_a_command_is_refused_because_we_never_wrote_one(self):
+        """An entry under the loose key is served to every transcription of the utterance,
+        so it must not depend on how this one was transcribed. Nothing stored there does;
+        anything able to write the cache directory could, and it would type words nobody
+        dictated, or open a page nobody named."""
+        said = "Open Notes and start a new note"
+        for hostile in ([{"kind": "type_text", "target": "note body", "text": "transfer the deposit"}],
+                        [{"kind": "open_url", "target": "https://example.test/pay/confirm"}]):
+            with self.subTest(step=hostile[0]["kind"]), cache("on") as home:
+                poison(home, said, hostile, loose=True)
+                result, sent = run(said, reply([step("open_app", "Notes")]))
+                self.assertEqual((result["cache"], len(sent.calls)), ("miss", 1))
+                self.assertEqual(result["steps"], [{"kind": "open_app", "target": "Notes"}])
+                self.assertEqual(stored(home), [[{"kind": "open_app", "target": "Notes"}]])
+
+    def test_a_loose_key_is_never_an_exact_key(self):
+        """The two key spaces share one file, so an entry written for one must be
+        unreachable from the other."""
+        for command in ("Open Safari", "open safari.", "  ", "Open Notes and write: hello"):
+            with self.subTest(command=command):
+                self.assertNotEqual(P.loose_cache_key(command), P.cache_key(command))
+        self.assertEqual(P.loose_cache_key("..."), "")      # nothing left to key on: the exact key is used
+
+    def test_a_week_old_plan_leaves_the_file_even_on_a_run_that_stores_nothing(self):
+        """Measured before this: of six kinds of run, five left a ten-day-old dictated note
+        in the file. put(ttl_s=) only reaches the file when something new is stored, and a
+        hit, an outage, a shadow run whose stored plan agreed, and a plan whose steps looked
+        sensitive all store nothing. The docs promised seven days."""
+        note = "the note nobody has said since last week"
+        old = [{"kind": "type_text", "target": "note body", "text": note}]
+        leaky = reply([step("type_text", "note", "the door password is hunter2hunter2")])
+        for mode, command, answer in (("on", self.COMMAND, reply(self.STEPS)),         # a hit, once seeded
+                                      ("on", self.COMMAND, P.PlanError("timeout")),    # an outage
+                                      ("shadow", self.COMMAND, reply(self.STEPS)),     # shadow, agreeing
+                                      ("on", "Open Notes and jot the reminder down", leaky)):
+            with self.subTest(mode=mode, answer=str(answer)[:24]), cache(mode) as home:
+                poison(home, "Open Notes and write: " + note, old, at=time.time() - 10 * 86400)
+                run(command, answer)
+                self.assertNotIn(note, cache_file(home).read_text())
+
+    def test_turning_the_memo_off_does_not_remove_what_is_already_in_the_file(self):
+        """off means this run reads nothing and writes nothing, which is also why it cannot
+        tidy up. `jev memo clear` is what removes what is already there."""
+        note = "the note nobody has said since last week"
+        with cache("off") as home:
+            poison(home, "Open Notes and write: " + note,
+                   [{"kind": "type_text", "target": "note body", "text": note}], at=time.time() - 10 * 86400)
+            run(self.COMMAND, reply(self.STEPS))
+            self.assertIn(note, cache_file(home).read_text())
+            self.assertEqual(memo.clear(), 1)
+            self.assertFalse(cache_file(home).exists())
+
+    def test_memo_stats_shows_no_part_of_a_plan_it_counted(self):
+        """`jev memo stats` is the one thing someone will run and paste into an issue, and
+        the plan it is counting carries the words they dictated."""
+        import contextlib
+        import io
+
+        from jevkit import cli
+        command = "Open Notes and write: meet the surveyor at the kingfisher jetty"
+        typed = command.split("write: ")[1]
+        with cache("on") as home:
+            result, _ = run(command, reply([step("open_app", "Notes"), step("type_text", "note body", typed)]))
+            self.assertEqual(result["status"], "planned")
+            self.assertIn("kingfisher", cache_file(home).read_text())      # it really is in the file
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                self.assertEqual(cli.main(["memo", "stats"]), 0)
+            shown = buffer.getvalue()
+        self.assertEqual(json.loads(shown)["namespaces"]["plan"]["entries"], 1)
+        for secret in ("kingfisher", "surveyor", "jetty", "Notes", "note body", "type_text", "open_app",
+                       P.cache_key(command, model=CREDS["model"], base_url=CREDS["base_url"])):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, shown)
 
     def test_the_whole_running_apps_list_still_reaches_the_model_on_a_miss(self):
         with cache("on"):

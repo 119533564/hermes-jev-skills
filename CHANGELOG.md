@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.18.0 (2026-09-20)
+
+Three things that were shipped but not performing: measured, then fixed.
+
+**The plan cache was worth almost nothing, and now is worth something**
+
+- It shipped in 0.14.0 keyed byte-for-byte on the command. Commands arrive by dictation.
+  Measured on 22 repeats of six spoken commands, re-transcribed the ways a dictation engine
+  really varies them — a capital on the first word, a capital on an app name, the full stop
+  it adds, a doubled space — it hit **1 time in 22 (5%)**. Twenty-one repeats of something
+  the person had already said paid for a plan that was already on disk.
+- A second, normalised key sits beside the exact one: **64%** on the same corpus. The eight
+  pairs that must never share a plan still miss, and every step still goes through
+  `clean_step` and the never-send filter on read. The misses that remain are listed in
+  `docs/response-caches.md`; they carry dictated content, where sharing a plan would change
+  what gets typed.
+- **An expired entry was never actually removed.** The 7-day TTL refused to serve it and
+  left it on disk, so a dictated note sat there until 256 newer plans evicted it. Expiry now
+  removes.
+
+**The mailbox sorter's dollar figure was made up**
+
+- It priced a batch at a flat 450 tokens per message. Measured against the live endpoint
+  with synthetic fixtures, a full-length message is **1,402** — the constant was a third of
+  reality. The summary now reports what the provider counted, falls back to characters this
+  module measured itself sending, says which of the two it used, and reports `usd: None`
+  when nothing could be counted rather than a confident zero.
+- **`automated` no longer libels a colleague.** It meant "the address looks like a robot's",
+  which put a person writing from `support@` on the path to a disposal lane. It now means
+  only what can be read off the address: a mailbox that cannot receive a reply (`noreply@`,
+  `mailer-daemon@`, `bounces@`). Shared mailboxes a team reads — `support@`, `billing@`,
+  `orders@` — get a fourth class, **`role`**.
+- **A mail body is screened for text aimed at an agent**, the same screen the memory filter
+  uses. A hit is **flagged**, never filed away and never dropped: the row keeps its lane,
+  gains `injection`, and sets `needs_attention`. If a screened message disappeared, one
+  sentence in a body would be the most useful thing an attacker could reach in this command.
+- `jev mail` has a SKILL.md and `docs/mailbox-sorting.md`, including when to use it instead
+  of `jev triage`.
+
+**`jev triage` refuses bad input the way its siblings do**
+
+- A missing file, a directory, non-UTF-8 bytes, invalid JSON, a bare scalar, a `null`, or
+  entries that are not objects each printed a Python traceback and exited 1. They now print
+  `{"error": "invalid_request", "detail": ...}` and exit 2, like `jev ask` and `jev mail`,
+  and stdin and `--file` accept the same envelopes. Entries that are not messages are
+  counted and reported rather than silently dropped.
+
+**Each of these was checked by a second agent that tried to break it**, and each found real
+defects in the first attempt — a sender-class fix that read every `Name <noreply@…>` header
+as a person, a `classify` that raised `OverflowError` on a non-finite token count in a
+reply, a claimed measurement that was not true of the shipped code, and an injection screen
+that flagged 2 of 30 ordinary developer mails. All fixed before this was committed.
+
+
 ## 0.17.0 (2026-09-20)
 
 Everything here was found by people reading the code from outside, in the first week this
@@ -137,7 +191,7 @@ A mailbox sorter, ported from someone else's app and changed where our own numbe
   not the local part — and not the percent-encoded copy in an unsubscribe link, the
   base64'd copy in a tracking link, or a quoted-printable `=40`. Mail is decoded before it
   is screened, and URL query strings are dropped. The domain and a locally-derived
-  `sender_class` (automated / list / person) carry what the lane question needs; a message
+  `sender_class` (automated / list / person; a fourth class, role, arrived in 0.18.0) carry what the lane question needs; a message
   that looks like it holds a secret is not sent at all — that check reads the decoded text
   too — and is flagged for a person instead. Fail-open means a person looks, never that
   mail disappears: a Jev failure, a transport that crashes, a secret, a message with

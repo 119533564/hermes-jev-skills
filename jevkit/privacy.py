@@ -106,7 +106,7 @@ def redact(text: str, limit: int = 4000) -> str:
     out = _TRACKING.sub(_hold, out)
     out = _TOKEN_SHAPES.sub("[secret]", out)
     # Keep the variable's NAME (it is often the useful signal) and mask only its value.
-    out = _SECRET_ASSIGNMENT.sub(lambda m: re.split(r"[:=]", m.group(0), 1)[0].rstrip() + "=[secret]", out)
+    out = _SECRET_ASSIGNMENT.sub(lambda m: re.split(r"[:=]", m.group(0), maxsplit=1)[0].rstrip() + "=[secret]", out)
     out = _LONG_HEX.sub("[hex]", out)
     # After [hex], so a digest stays a digest, and before the phone rules, so a spaced
     # card number is not shredded into a "phone" and a remainder.

@@ -1308,6 +1308,199 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(len(s["needs_review"]), 1)
 
 
+class TriageCommandTests(unittest.TestCase):
+    """`jev triage` is the input boundary, and it had the defects `jev mail` just lost.
+
+    Nothing here reaches Jev: classify_many is replaced, and every refusal is asserted to
+    have stopped before it could be called.
+    """
+
+    def run_triage(self, argv, stdin=None, raw=None):
+        import contextlib
+        import io
+        from jevkit import cli
+        out = io.StringIO()
+        if raw is not None:
+            # errors="surrogateescape", because that is the stdin the CLI is actually
+            # handed: Python runs in UTF-8 mode on macOS and in the CI container, and
+            # under a strict wrapper — which no real run has — undecodable bytes raise
+            # where the real thing quietly turns them into lone surrogates. A byte test
+            # against a strict decoder proves nothing about the program.
+            typed = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="surrogateescape")
+        else:
+            typed = io.StringIO(stdin or "")
+        with mock.patch.object(cli.sys, "stdin", typed), contextlib.redirect_stdout(out):
+            code = cli.main(["triage"] + argv)
+        return code, json.loads(out.getvalue() or "null")
+
+    def setUp(self):
+        patcher = mock.patch.object(
+            triage, "classify_many",
+            side_effect=lambda messages, **kw: [{"route": "queue", "sent_to_jev": True, "confidence": 0.9,
+                                                 "subject": str(m.get("subject") or ""), "id": m.get("id")}
+                                                for m in messages])
+        self.classify_many = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, text):
+        handle = tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False)
+        handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
+    THREE = [{"subject": "a", "content": "b"}, {"subject": "c", "content": "d"},
+             {"subject": "e", "content": "f"}]
+
+    def test_an_envelope_reads_the_same_from_stdin_and_from_a_file(self):
+        """They disagreed. Piped in, `{"messages": [...]}` was wrapped as ONE message with
+        neither subject nor body: it classified as "empty message", the summary reported an
+        inbox of one, exit 0, and nothing said the other two had never been read. The same
+        file on --file gave three."""
+        for key in ("messages", "items"):
+            payload = json.dumps({key: self.THREE})
+            code, printed = self.run_triage(["--summary"], stdin=payload)
+            self.assertEqual((code, printed["messages"]), (0, 3), f"stdin {key}")
+            code, printed = self.run_triage(["--summary", "--file", self.write(payload)])
+            self.assertEqual((code, printed["messages"]), (0, 3), f"--file {key}")
+
+    def test_a_bare_list_reads_the_same_from_stdin_and_from_a_file(self):
+        payload = json.dumps(self.THREE)
+        for argv, stdin in ((["--summary"], payload), (["--summary", "--file", self.write(payload)], None)):
+            code, printed = self.run_triage(argv, stdin=stdin)
+            self.assertEqual((code, printed["messages"]), (0, 3), argv)
+
+    def test_a_lone_message_object_is_still_a_batch_of_one(self):
+        """Piping one message in on its own is what stdin has always taken, so tightening
+        the envelopes must not turn an existing caller's exit 0 into a refusal."""
+        for argv, stdin in ((["--summary"], json.dumps(self.THREE[0])),
+                            (["--summary", "--file", self.write(json.dumps(self.THREE[0]))], None)):
+            code, printed = self.run_triage(argv, stdin=stdin)
+            self.assertEqual((code, printed["messages"]), (0, 1), argv)
+
+    def test_an_entry_that_is_not_a_message_object_is_counted_not_silently_dropped(self):
+        """An exporter row that is not an object killed the whole batch with an
+        AttributeError raised inside the thread pool, after other messages had been sent."""
+        payload = json.dumps([{"subject": "one"}, "two", None, {"subject": "three"}, 4])
+        code, printed = self.run_triage(["--summary"], stdin=payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(printed["messages"], 2)
+        self.assertEqual(printed["dropped_not_an_object"], 3)
+        # The count has to survive the full output too, not just --summary.
+        code, printed = self.run_triage([], stdin=payload)
+        self.assertEqual(printed["summary"]["dropped_not_an_object"], 3)
+        self.assertEqual(len(printed["messages"]), 2)
+
+    def test_bad_input_is_an_invalid_request_on_stdout_not_a_traceback(self):
+        """`jev ask` and `jev mail` promise {"error": "invalid_request", ...} and exit 2.
+        Every case here answered with a raw Python traceback on stderr, exit 1, and nothing
+        at all on stdout — a caller reading stdout was told neither what broke nor that
+        anything had."""
+        with tempfile.TemporaryDirectory() as folder:
+            cases = [
+                (["--file", "/no/such/file.test.json"], None),
+                (["--file", folder], None),
+                (["--file", self.write("not json at all")], None),
+                (["--file", self.write(b'[{"subject": "\xff\xfe"}]')], None),
+                (["--file", self.write("null")], None),
+                (["--file", self.write('{"messages": "not a list"}')], None),
+                ([], "not json at all"),
+                ([], '"hello"'),
+                ([], "42"),
+                ([], "null"),
+                ([], '{"items": "not a list"}'),
+            ]
+            for argv, stdin in cases:
+                code, printed = self.run_triage(argv, stdin=stdin)
+                self.assertEqual(code, 2, argv)
+                self.assertEqual(printed["error"], "invalid_request", argv)
+                self.assertTrue(printed["detail"], argv)
+                self.assertEqual(self.classify_many.call_args_list, [],
+                                 "input that was refused must never reach Jev")
+
+    def test_stdin_that_is_not_utf_8_is_refused_in_the_same_words_as_a_file(self):
+        """Through the stdin a real run gets, nothing raised: UTF-8 mode decodes with
+        surrogateescape, so \\xff\\xfe became "\\udcff\\udcfe", json.loads read it, and
+        the CLI exited 0 having sent that subject to Jev, which answered http_400. The
+        refusal has to come from decoding the bytes, not from hoping the decoder is
+        strict."""
+        code, printed = self.run_triage([], raw=b'[{"subject": "\xff\xfe"}]')
+        self.assertEqual(code, 2)
+        self.assertIn("UTF-8", printed["detail"])
+        self.assertEqual(self.classify_many.call_args_list, [],
+                         "bytes that are not UTF-8 must never reach Jev")
+
+    def test_stdin_larger_than_the_cap_says_which_limit_it_hit(self):
+        """A valid 3MB export was read as a fixed 2,000,000-character slice and then
+        parsed, so it came back "stdin is not valid JSON: Unterminated string" — while
+        --file, which has no cap, classified all of it. The caller was told its export
+        was corrupt, and the two paths it was promised parity on still disagreed."""
+        payload = json.dumps([{"subject": "s", "content": "x" * 200}] * 12000).encode("utf-8")
+        self.assertGreater(len(payload), 2_000_000)
+        code, printed = self.run_triage(["--summary"], raw=payload)
+        self.assertEqual(code, 2)
+        self.assertNotIn("not valid JSON", printed["detail"])
+        self.assertIn("--file", printed["detail"])
+        self.assertEqual(self.classify_many.call_args_list, [])
+        # ...and --file is not a lie: the same bytes still go through in full.
+        code, printed = self.run_triage(["--summary", "--file", self.write(payload)])
+        self.assertEqual((code, printed["messages"]), (0, 12000))
+
+    def test_a_lone_message_carrying_an_items_field_is_a_message_not_an_empty_envelope(self):
+        """A thread object, and more than one exporter, put a "messages" or "items" list
+        inside a single message. Read as an envelope, {"subject": ..., "items": []} became
+        a batch of nothing: exit 1, "no messages to classify" on stderr, and the one
+        message handed in was gone with the exit claiming the inbox was empty."""
+        for extra in ({"items": []}, {"messages": []}, {"items": [{"name": "an attachment"}]}):
+            message = dict({"subject": "a", "content": "b"}, **extra)
+            for argv, stdin in ((["--summary"], json.dumps(message)),
+                                (["--summary", "--file", self.write(json.dumps(message))], None)):
+                code, printed = self.run_triage(argv, stdin=stdin)
+                self.assertEqual((code, printed["messages"]), (0, 1), extra)
+
+    def test_a_batch_of_entries_that_are_none_of_them_objects_reports_the_count(self):
+        """The count only survived when at least one entry was a real message. A list of
+        5000 junk rows filtered down to nothing and exited "no messages to classify" —
+        the one sentence that is true of an empty batch and false of this one — on stderr,
+        with nothing on stdout for the caller to read."""
+        for argv, stdin in ((["--summary"], '["a", "b", "c"]'),
+                            (["--summary"], '{"messages": [1, 2, 3]}'),
+                            (["--summary", "--file", self.write('{"items": [1, 2, 3]}')], None)):
+            code, printed = self.run_triage(argv, stdin=stdin)
+            self.assertEqual(code, 2, argv)
+            self.assertEqual(printed["error"], "invalid_request", argv)
+            self.assertIn("3", printed["detail"], argv)
+        self.assertEqual(self.classify_many.call_args_list, [])
+
+    def test_a_timeout_the_socket_cannot_take_is_refused_before_any_message_is_sent(self):
+        """urllib hands the timeout to the socket: nan raises ValueError there, inf raises
+        OverflowError, and zero or less aborts the call before it is sent. None of that
+        reaches triage's fail-open path, so it must be refused here."""
+        for value in ("nan", "inf", "-1", "0", "3600.1", "100000"):
+            code, printed = self.run_triage(["--timeout=" + value], stdin=json.dumps(self.THREE))
+            self.assertEqual(code, 2, value)
+            self.assertEqual(printed["error"], "invalid_request", value)
+            self.assertIn("--timeout", printed["detail"], value)
+        self.assertEqual(self.classify_many.call_args_list, [],
+                         "a refused timeout must never reach Jev")
+
+    def test_the_timeout_asked_for_is_the_timeout_every_message_gets(self):
+        """The flag existed on `jev mail` only, so a triage batch always ran at the
+        library default however long the caller could afford to wait."""
+        code, _ = self.run_triage(["--summary", "--timeout", "12.5"], stdin=json.dumps(self.THREE))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.classify_many.call_args.kwargs["timeout"], 12.5)
+        self.run_triage(["--summary"], stdin=json.dumps(self.THREE))
+        self.assertEqual(self.classify_many.call_args.kwargs["timeout"], 6.0)
+
+    def test_an_empty_batch_says_so_rather_than_reporting_an_empty_inbox(self):
+        for argv, stdin in ((["--summary"], "[]"), (["--summary"], '{"messages": []}'),
+                            (["--summary", "--file", self.write("[]")], None)):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_triage(argv, stdin=stdin)
+            self.assertIn("no messages to classify", str(caught.exception), argv)
+
+
 class ConfidentialHandoffTests(unittest.TestCase):
     """Some deployments forbid carrying customer detail into the next session.
 

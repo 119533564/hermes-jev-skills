@@ -283,6 +283,89 @@ class HousekeepingTests(MemoCase):
         self.assertTrue(bystander.exists())
 
 
+class PurgeTests(MemoCase):
+    """An entry that is not SERVED is not an entry that is GONE, and these hold dictation."""
+
+    def test_purge_removes_what_is_past_the_ttl_and_leaves_what_is_not(self):
+        stale, fresh = memo.key("plan", "stale"), memo.key("plan", "fresh")
+        with mock.patch.object(memo.time, "time", return_value=1_000_000.0):
+            memo.put("plan", stale, {"text": "the note nobody has said since last week"})
+        with mock.patch.object(memo.time, "time", return_value=1_000_000.0 + WEEK + 10):
+            memo.put("plan", fresh, {"text": "today"})
+            self.assertIn("last week", self.file.read_text())      # a put without a ttl does not reach it
+            self.assertEqual(memo.purge("plan", WEEK), 1)
+            self.assertNotIn("last week", self.file.read_text())
+            self.assertEqual(memo.get("plan", fresh, WEEK), {"text": "today"})
+
+    def test_purge_does_not_rewrite_a_file_with_nothing_expired(self):
+        """It runs before every cache read. A write per read would cost the fast path, and
+        would be one more chance to drop another process's entry, for nothing."""
+        memo.put("plan", self.k, {"n": 1})
+        with mock.patch.object(memo, "_save", side_effect=AssertionError("rewrote an unexpired file")):
+            self.assertEqual(memo.purge("plan", WEEK), 0)
+
+    def test_purge_leaves_alone_everything_it_cannot_read(self):
+        """A newer version's file is not ours to empty, and a corrupt one is repaired by the
+        next put, not by housekeeping that cannot tell what is in it."""
+        self.assertEqual(memo.purge("plan", WEEK), 0)              # nothing written yet
+        self.assertEqual(memo.purge("../x", WEEK), 0)
+        for junk in (b"{not json", b"", json.dumps({"schema": "jev.memo_v2", "entries": {}}).encode()):
+            with self.subTest(junk=junk[:12]):
+                self.write(junk)
+                self.assertEqual(memo.purge("plan", WEEK), 0)
+                self.assertEqual(self.file.read_bytes(), junk)
+
+
+class ConcurrentWriterTests(MemoCase):
+    """Two processes writing one namespace at once. The file says the last writer wins."""
+
+    def test_the_writer_that_finishes_second_wins_and_the_other_entry_is_simply_gone(self):
+        """Not a corrupt file, not a merged one, not a torn value: one entry fewer, which
+        costs its caller the one call it would have made without a memo at all."""
+        mine, theirs = memo.key("plan", "mine"), memo.key("plan", "theirs")
+        memo.put("plan", mine, {"n": "before"})
+        first, second = memo._load(self.file), memo._load(self.file)     # both read the same file
+        first[theirs] = {"at": memo.time.time(), "v": {"n": "theirs"}}
+        second[mine] = {"at": memo.time.time(), "v": {"n": "mine"}}
+        memo._save(self.file, first)
+        memo._save(self.file, second)
+        self.assertIsNone(memo.get("plan", theirs, WEEK))                # the loss, exactly as documented
+        self.assertEqual(memo.get("plan", mine, WEEK), {"n": "mine"})
+        self.assertEqual(sorted(json.loads(self.file.read_text())), ["entries", "schema"])
+
+    def test_four_processes_writing_at_once_never_leave_anything_incoherent(self):
+        """os.replace is atomic, so a reader sees one whole file or the other one. What must
+        never appear is a half-written file, a torn value, or a temp file left behind."""
+        import subprocess
+        import sys
+        import textwrap
+        root = Path(memo.__file__).resolve().parents[1]
+        writer = self.home / "writer.py"
+        writer.write_text(textwrap.dedent("""
+            import sys
+            from jevkit import memo
+            tag = sys.argv[1]
+            for n in range(30):
+                memo.put("plan", memo.key("plan", tag, n),
+                         {"steps": [{"kind": "open_app", "target": tag}], "n": n})
+        """))
+        env = dict(os.environ, XDG_CACHE_HOME=str(self.home), PYTHONPATH=str(root))
+        running = [subprocess.Popen([sys.executable, str(writer), "writer-%d" % n], cwd=str(root), env=env)
+                   for n in range(4)]
+        for process in running:
+            self.assertEqual(process.wait(timeout=120), 0)
+        entries = json.loads(self.file.read_text())["entries"]
+        self.assertTrue(entries, "every writer's work was lost")
+        self.assertLessEqual(len(entries), memo.MAX_ENTRIES)
+        for name, entry in entries.items():
+            self.assertRegex(name, r"^[0-9a-f]{64}$")
+            self.assertIsInstance(entry["at"], float)
+            self.assertEqual(sorted(entry["v"]), ["n", "steps"])
+            self.assertTrue(entry["v"]["steps"][0]["target"].startswith("writer-"))
+            self.assertIsInstance(entry["v"]["n"], int)
+        self.assertEqual(list(self.file.parent.glob("*.tmp.*")), [])
+
+
 class MemoCliTests(unittest.TestCase):
     def test_jev_memo_reports_counts_and_never_a_key_or_a_value(self):
         import contextlib, io, os, tempfile

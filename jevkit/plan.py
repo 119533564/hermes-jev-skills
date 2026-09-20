@@ -20,8 +20,9 @@ What leaves the machine: the command, the front app's name and the running app n
 the text model endpoint (OpenRouter unless TEXT_MODEL_BASE_URL says otherwise). A command
 that ``privacy.is_sensitive`` flags is not sent at all.
 
-What stays on it: the validated steps of a plan, in ``jevkit/memo.py``'s store, so the same
-command need not be planned twice (see "the plan cache" below). ``JEV_MEMO`` is ``off``,
+What stays on it: the validated steps of a plan, in ``jevkit/memo.py``'s store, so one
+spoken command need not be planned twice however it was transcribed (see ``cache_key`` and
+``loose_cache_key``, and docs/response-caches.md). ``JEV_MEMO`` is ``off``,
 ``shadow`` or ``on``, and shadow, which reuses nothing, is the default.
 """
 from __future__ import annotations
@@ -552,11 +553,11 @@ def rules_version() -> str:
     return hashlib.sha256(rules.encode("utf-8")).hexdigest()[:16]
 
 
-def cache_key(command: str, front_app: str = "", running_apps: Sequence[str] = (), *,
-              model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> str:
-    """The memo key for one command in one context. "" when it cannot be built.
+def _key_parts(command: str, front_app: str, running_apps: Sequence[str],
+               model: str, base_url: str) -> List[str]:
+    """Everything a key carries except the command itself. Case-insensitive throughout.
 
-    The full running-apps list is deliberately NOT in the key. It arrives in z-order, which
+    The full running-apps list is deliberately NOT here. It arrives in z-order, which
     changes every time a window is touched, so with it in the key no two runs would ever
     match. Only an app the command NAMES can change a plan ("switch to Notes" opens it or
     clicks it). The model still gets the whole list on a miss. The front app is in, because
@@ -564,21 +565,93 @@ def cache_key(command: str, front_app: str = "", running_apps: Sequence[str] = (
     of the API key: the same model at the same host answers alike for every key, and a hash
     of a credential is one more thing on disk that never needed to be there.
     """
+    # Whitespace-collapsed on both sides, because the doubled space a dictation engine puts
+    # between words is exactly what this test used to be defeated by. "Switch to Visual
+    # Studio Code" said with a doubled space inside the name did not contain "visual studio
+    # code", so the app went unnamed -- and an app that goes unnamed is an app whose running
+    # or not is no longer in the key. Measured: that command produced the SAME key with the
+    # app running and with it gone, and the plan kept for the running machine (click it in
+    # the dock) was served to the one where it was not open at all.
+    folded = " ".join(command.casefold().split())
+    named = sorted({a for a in (" ".join(str(x).casefold().split()) for x in running_apps)
+                    if a and a in folded})
+    return [front_app.strip().casefold(), ",".join(named), model,
+            urlsplit(base_url).hostname or "", rules_version()]
+
+
+# The full stop, comma or question mark a dictation engine puts at the end of a sentence
+# nobody punctuated out loud.
+_ENGINE_PUNCTUATION = re.compile(r"[.!?,;\s]+$")
+
+
+def cache_key(command: str, front_app: str = "", running_apps: Sequence[str] = (), *,
+              model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> str:
+    """The memo key for this command exactly as it was said. "" when it cannot be built.
+
+    The command goes in as given, not with its whitespace collapsed. Collapsed, "type
+    please  send it" was answered with the plan kept for "type please send it", whose typed
+    text no longer matched the command, so the never-send filter could not tell the
+    dictated "send" from a request and kept a click on Send nobody asked for.
+    """
     try:
-        folded = command.casefold()
-        named = sorted({a.casefold() for a in (str(x).strip() for x in running_apps)
-                        if a and a.casefold() in folded})
-        # The command goes in as given, not with its whitespace collapsed. Collapsed, "type
-        # please  send it" was answered with the plan kept for "type please send it", whose
-        # typed text no longer matched the command, so the never-send filter could not tell
-        # the dictated "send" from a request and kept a click on Send nobody asked for.
-        return memo.key(CACHE_NAMESPACE, command.strip(), front_app.strip().casefold(),
-                        ",".join(named), model, urlsplit(base_url).hostname or "", rules_version())
+        return memo.key(CACHE_NAMESPACE, command.strip(),
+                        *_key_parts(command, front_app, running_apps, model, base_url))
     except Exception:  # noqa: BLE001 - an address urlsplit rejects costs the cache, never the plan
         return ""
 
 
-def _cached_steps(key: str) -> Optional[List[Dict[str, Any]]]:
+def loose_cache_key(command: str, front_app: str = "", running_apps: Sequence[str] = (), *,
+                    model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> str:
+    """The key for the UTTERANCE rather than for one transcription of it. "" when unavailable.
+
+    These commands are dictated, and two transcriptions of one sentence differ in the
+    capital on the first word, in the capital on an app name, in the full stop the engine
+    adds and in a doubled space. Measured over 19 repeats of six spoken commands, the exact
+    key above hit once: every other repeat was a second model call for a plan already on
+    disk. This key ignores all four of those differences, which took the same 19 repeats
+    from 5% to 68%. The corpus is ``PlanCacheTests.DICTATED``, so the figure can be
+    re-measured rather than taken on trust (docs/response-caches.md).
+
+    It is only ever written or read for a plan that ``_survives_rewording`` accepts -- one
+    that could not have come out differently for any of them. A plan that types dictated
+    words stays on the exact key, where "write: Buy milk" and "write: buy milk" are the two
+    different commands they really are.
+    """
+    try:
+        loose = _ENGINE_PUNCTUATION.sub("", " ".join(command.casefold().split()))
+        if not loose:
+            return ""
+        # The trailing field is what keeps the two key spaces apart: an exact key has one
+        # part fewer, so no loose entry can ever be served as an exact one or the reverse.
+        return memo.key(CACHE_NAMESPACE, loose,
+                        *_key_parts(command, front_app, running_apps, model, base_url),
+                        "one utterance, not one transcription")
+    except Exception:  # noqa: BLE001 - same as above: the cache goes, the plan does not
+        return ""
+
+
+def _survives_rewording(steps: Sequence[Mapping[str, Any]]) -> bool:
+    """True when no field of this plan is a copy of the command's exact characters.
+
+    Such a plan is the same plan for every transcription of the utterance, which is the
+    whole justification for the loose key. Exactly two fields are not: the text of a
+    ``type_text``, which is typed character for character, and the path of an address,
+    because /Docs and /docs are different pages. Everything else a step can hold -- an app
+    name, an on-screen target, a menu path, a key name, a count -- is matched
+    case-insensitively by whatever receives it, and ``clean_step`` has already collapsed
+    the whitespace in it.
+    """
+    for step in steps:
+        if str(step.get("text") or "").strip():
+            return False
+        if step.get("kind") == "open_url":
+            parts = urlsplit(str(step.get("target") or ""))
+            if parts.path.strip("/") or parts.query or parts.fragment:
+                return False
+    return True
+
+
+def _cached_steps(key: str, *, loose: bool = False) -> Optional[List[Dict[str, Any]]]:
     """Steps from the memo, validated again, or None. The file is not trusted.
 
     It sits in a cache directory, and whatever can write there can write a step. Each one
@@ -597,22 +670,37 @@ def _cached_steps(key: str) -> Optional[List[Dict[str, Any]]]:
     if any(step is None for step in steps):
         memo.drop(CACHE_NAMESPACE, key)
         return None
-    return [step for step in steps if step is not None]
+    kept = [step for step in steps if step is not None]
+    if loose and not _survives_rewording(kept):
+        # Nothing this module wrote can be here: a plan that types dictated words is only
+        # ever stored on the exact key. Someone else put it in the file, and serving it
+        # would type words this transcription of the command does not contain.
+        memo.drop(CACHE_NAMESPACE, key)
+        return None
+    return kept
 
 
-def _remember(key: str, steps: Sequence[Mapping[str, Any]]) -> None:
-    """Keep a plan, unless a step holds something that must not sit in a file.
+def _remember(key: str, loose_key: str, steps: Sequence[Mapping[str, Any]]) -> None:
+    """Keep a plan under the one key that may serve it, unless a step holds something that
+    must not sit in a file.
 
     The command was screened before it got here, but the model writes the steps and can
     put in a step what the command only hinted at. The steps stored are the ones from
     BEFORE the never-send filter, so that filter runs on every read under the rules in
     force at that moment, not the rules of the day the entry was written.
+
+    One key, not both: a plan reachable by the loose key is reachable by every transcription
+    of the utterance including this one, so a second copy would only halve how many
+    different commands the 256-entry file can hold.
     """
     try:
-        if not key or any(privacy.is_sensitive(str(step.get(field) or ""))
-                          for step in steps for field in ("target", "text")):
+        if any(privacy.is_sensitive(str(step.get(field) or ""))
+               for step in steps for field in ("target", "text")):
             return
-        memo.put(CACHE_NAMESPACE, key, {"steps": [dict(step) for step in steps]}, ttl_s=CACHE_TTL_S)
+        where = loose_key if loose_key and _survives_rewording(steps) else key
+        if not where:
+            return
+        memo.put(CACHE_NAMESPACE, where, {"steps": [dict(step) for step in steps]}, ttl_s=CACHE_TTL_S)
     except Exception:  # noqa: BLE001 - the plan is already made; failing to keep it costs the next run a call
         return
 
@@ -631,10 +719,14 @@ def forget(command: str, front_app: str = "", running_apps: Sequence[str] = (), 
         if len(command) > MAX_COMMAND_CHARS or privacy.is_sensitive(command):
             return          # never stored, so there is nothing to find, and it is never keyed
         creds = dict(credentials) if credentials is not None else _endpoint(os.environ)
-        key = cache_key(command, front_app, running_apps, model=creds.get("model") or DEFAULT_MODEL,
-                        base_url=(creds.get("base_url") or DEFAULT_BASE_URL).rstrip("/"))
-        if key:
-            memo.drop(CACHE_NAMESPACE, key)
+        where = {"model": creds.get("model") or DEFAULT_MODEL,
+                 "base_url": (creds.get("base_url") or DEFAULT_BASE_URL).rstrip("/")}
+        # Both keys: which one holds this command's plan depends on what the model wrote,
+        # and a caller asking to forget a run that went wrong does not know that.
+        for key in (cache_key(command, front_app, running_apps, **where),
+                    loose_cache_key(command, front_app, running_apps, **where)):
+            if key:
+                memo.drop(CACHE_NAMESPACE, key)
     except Exception:  # noqa: BLE001 - forgetting is a courtesy; the caller is already handling a failure
         return
 
@@ -686,15 +778,31 @@ def plan(command: str, *, front_app: str = "", running_apps: Sequence[str] = (),
     # The cache comes after every check above on purpose. A sensitive command has already
     # returned, so it is never hashed into a key, let alone stored; and a machine with no
     # text-model key behaves exactly as it did before there was a cache.
+    if mode != "off":
+        # put(ttl_s=) only clears expired entries out as a side effect of storing something
+        # new, and the runs that store nothing -- a shadow run whose stored plan agreed, a
+        # plan whose steps looked sensitive, an outage, a hit -- are exactly the runs that
+        # would leave a week-old dictation sitting in the file. The docs said seven days,
+        # so seven days is when it has to go, whatever this run turns out to do. It reads
+        # the file and rewrites it only when something really expired.
+        memo.purge(CACHE_NAMESPACE, CACHE_TTL_S)
     memo_key = "" if mode == "off" else cache_key(command, front_app, running_apps, model=model, base_url=base_url)
-    cached = _cached_steps(memo_key)
+    loose_key = "" if mode == "off" else loose_cache_key(command, front_app, running_apps,
+                                                         model=model, base_url=base_url)
+    # Exact first: a plan that types dictated words is only stored there, and it is the
+    # right answer for this transcription and no other.
+    cached, cached_key = _cached_steps(memo_key), memo_key
+    if cached is None and loose_key:
+        loose_hit = _cached_steps(loose_key, loose=True)
+        if loose_hit is not None:
+            cached, cached_key = loose_hit, loose_key
     if cached is not None and mode == "on":
         cache = "hit"
         kept, dropped = enforce_never_send(command, cached)
         if not kept:
             # Nothing in it survives today's rules, so it would only ever be a slower way
             # to say "fallback". Drop it and let the next run ask the model again.
-            memo.drop(CACHE_NAMESPACE, memo_key)
+            memo.drop(CACHE_NAMESPACE, cached_key)
             return fallback("nothing_safe_planned", model=model, dropped=dropped)
         return result("planned", kept, model=model, dropped=dropped)
     body = json.dumps(build_request(command, front_app, running_apps, model=model, base_url=base_url),
@@ -727,7 +835,7 @@ def plan(command: str, *, front_app: str = "", running_apps: Sequence[str] = (),
     # Stored only now, when the fresh call has ended as a plan someone can run. A fallback
     # is never stored: it would turn one outage into a week of them.
     if cached is None or steps != cached:
-        _remember(memo_key, steps)
+        _remember(memo_key, loose_key, steps)
     return result("planned", kept, model=model, dropped=dropped, usage=usage)
 
 

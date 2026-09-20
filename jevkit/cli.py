@@ -253,21 +253,144 @@ def _rungs(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     return list(settings.get("rungs") or [])
 
 
+def _timeout_seconds(value: float, flag: str = "--timeout") -> float:
+    """A timeout the socket will take, or ValueError naming the flag.
+
+    urllib hands the timeout to the socket, which answers nan with ValueError and inf
+    with OverflowError, and zero or less aborts the call before it is sent — none of
+    which classify's fail-open path knew about. cmd_ask has carried the upper half of
+    this guard since the day the flag was added.
+    """
+    if not 0 < value <= 3600:
+        raise ValueError(f"{flag} must be a number of seconds, above 0 and at most 3600")
+    return value
+
+
+_STDIN_LIMIT = 2_000_000
+_STDIN_TOO_BIG = (f"stdin is larger than {_STDIN_LIMIT} bytes; pass the batch with --file, "
+                  f"which reads the whole file")
+
+
+def _triage_stdin_text() -> str:
+    """stdin as text, or a ValueError — without trusting the decoder stdin arrived with.
+
+    sys.stdin.errors is 'surrogateescape' whenever Python runs in UTF-8 mode, which is
+    the default both on macOS here and in the CI container, so reading through sys.stdin
+    NEVER raises on undecodable bytes: \\xff\\xfe silently became the lone surrogates
+    "\\udcff\\udcfe", json.loads read them happily, and that subject was sent to Jev and
+    came back http_400. A refusal that only fires when stdin happens to be a strict
+    decoder is not a refusal, so the bytes are decoded here instead.
+
+    The size guard is the other half of the same promise. Reading a fixed slice and then
+    parsing it reported a valid 3MB batch as "stdin is not valid JSON: Unterminated
+    string" — the JSON was fine, the reader cut it — and --file, which has no cap, took
+    the same bytes and classified all 12000 messages. Whichever limit stdin has, saying
+    which one it hit is the difference between a caller fixing it and a caller believing
+    its export is corrupt.
+    """
+    stream = sys.stdin
+    if stream is None:  # no stdin at all is bad input, not an AttributeError traceback
+        raise ValueError("there is no stdin to read; pass the batch with --file")
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:  # a StringIO stands in for stdin under test
+        text = stream.read(_STDIN_LIMIT + 1)
+        if len(text) > _STDIN_LIMIT:
+            raise ValueError(_STDIN_TOO_BIG)
+        return text
+    data = buffer.read(_STDIN_LIMIT + 1)
+    if len(data) > _STDIN_LIMIT:
+        raise ValueError(_STDIN_TOO_BIG)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("stdin is not valid JSON: it is not UTF-8 text") from None
+
+
+def _triage_input(args: argparse.Namespace) -> Any:
+    """The JSON, with every way it can be unreadable turned into a ValueError.
+
+    `jev ask` promises {"error": "invalid_request", ...} and exit 2 for bad input; this
+    command answered a missing file, a directory, non-UTF-8 bytes, invalid JSON, a bare
+    JSON scalar and a JSON null with a raw Python traceback on stderr and nothing at all
+    on stdout. The file half is `jev mail`'s reader, unchanged — the same file, opened
+    the same way, has to be refused with the same words.
+    """
+    if args.file:
+        return _mail_input(args)
+    # Not _stdin_json(): it turns only a JSONDecodeError into a message, and exits 1
+    # rather than printing the refusal an agent reading stdout can act on.
+    try:
+        return json.loads(_triage_stdin_text())
+    except json.JSONDecodeError as error:
+        raise ValueError(f"stdin is not valid JSON: {error}") from None
+    except RecursionError:
+        raise ValueError("stdin is nested too deeply to read") from None
+
+
+# The fields triage actually reads off a message. A dict naming any of them describes a
+# message, whatever else it carries.
+_MESSAGE_FIELDS = ("subject", "content", "body")
+
+
+def _triage_messages(raw: Any) -> List[Any]:
+    """One reader for --file and for stdin, which disagreed exactly as mail's did.
+
+    Piped in, `{"messages": [...]}` was wrapped as ONE message carrying neither subject
+    nor body: it classified locally as "empty message", the summary reported an inbox of
+    one, exit 0, and nothing said the real messages had never been read. The same
+    envelope in --file gave three. A triage tool that reports fewer messages than it was
+    handed and succeeds is the one failure a caller cannot notice.
+
+    A lone message object is still accepted on either path, because piping one message in
+    is what stdin has always taken — including one that itself carries a "messages" or
+    "items" field, which a thread object and several exporters do. Read as an envelope,
+    {"subject": ..., "content": ..., "items": []} became a batch of nothing and exited
+    "no messages to classify": the one message handed in was lost, and the exit said the
+    inbox was empty. An object carrying a "messages" or "items" key that is not a list
+    and no message field of its own is a malformed envelope, not a message, and is
+    refused.
+    """
+    if isinstance(raw, dict):
+        if not any(key in raw for key in ("messages", "items")):
+            return [raw]
+        if any(key in raw for key in _MESSAGE_FIELDS):
+            return [raw]
+    return _mail_messages(raw)
+
+
 def cmd_triage(args: argparse.Namespace) -> int:
     """Classify incoming messages: act now, today, queue, or ignore."""
-    if args.file:
-        raw = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        messages = raw if isinstance(raw, list) else raw.get("messages") or raw.get("items") or []
-    else:
-        raw = _stdin_json()
-        messages = raw if isinstance(raw, list) else [raw]
+    try:
+        timeout = _timeout_seconds(args.timeout)
+        entries = _triage_messages(_triage_input(args))
+    except ValueError as error:
+        # Same JSON-and-exit-2 contract `jev ask` and `jev mail` give. The caller is an
+        # agent reading stdout, and a traceback on stderr never told it what to fix.
+        _out({"error": "invalid_request", "detail": str(error)})
+        return 2
+    messages = [m for m in entries if isinstance(m, dict)]
+    dropped = len(entries) - len(messages)
     if not messages:
+        if dropped:
+            # "no messages to classify" is true of an empty batch and false of a batch of
+            # 5000 junk rows, and it went to stderr with an empty stdout, so the count
+            # that says what actually went wrong was thrown away with the rows.
+            _out({"error": "invalid_request",
+                  "detail": f"none of the {dropped} entries is a JSON object, so there is "
+                            f"nothing to classify"})
+            return 2
         raise SystemExit("no messages to classify")
-    rows = triage.classify_many(messages, workers=args.workers,
+    rows = triage.classify_many(messages, workers=args.workers, timeout=timeout,
                                 known_domains=args.customer_domain or [])
+    summary = triage.summarize(rows)
+    if dropped:
+        # An exporter row that is not an object used to kill the whole batch with an
+        # AttributeError from inside the thread pool, after other messages had already
+        # been sent and paid for. Counted here, the run finishes and says what it skipped.
+        summary["dropped_not_an_object"] = dropped
     if args.summary:
-        return _out(triage.summarize(rows))
-    return _out({"summary": triage.summarize(rows), "messages": rows})
+        return _out(summary)
+    return _out({"summary": summary, "messages": rows})
 
 
 _MAIL_SHAPES = ('the input must be a JSON list of messages, an object with "messages": [...], '
@@ -608,9 +731,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_memo)
 
     p = sub.add_parser("triage", help="classify incoming messages: now / today / queue / ignore")
-    p.add_argument("--file", help="JSON list of messages (subject, content, sender); else read stdin")
+    p.add_argument("--file", help='JSON list of messages (subject, content, sender), '
+                                  'or {"messages": [...]} or {"items": [...]}; else the same on stdin')
     p.add_argument("--customer-domain", action="append", help="a domain whose mail is a real customer (repeatable)")
     p.add_argument("--workers", type=int, default=8)
+    # The same default classify_many already used when nothing was passed: naming the flag
+    # changes what a caller can say, not what an existing caller gets.
+    p.add_argument("--timeout", type=float, default=6.0, help="seconds per message, at most 3600")
     p.add_argument("--summary", action="store_true", help="counts only, no per-message rows")
     p.set_defaults(func=cmd_triage)
 

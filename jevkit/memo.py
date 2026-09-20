@@ -199,6 +199,33 @@ def put(namespace: str, k: str, value: Dict[str, Any], ttl_s: Optional[float] = 
         return
 
 
+def purge(namespace: str, ttl_s: float) -> int:
+    """Remove every entry past ``ttl_s``, and say how many went. 0 for any kind of trouble.
+
+    ``get`` refusing to SERVE an expired entry is not the same as the entry being gone, and
+    an entry holds whatever the caller kept -- for the plan cache, the words a person
+    dictated. ``put(ttl_s=...)`` clears the expired ones out as a side effect of storing
+    something new, which is no help on the runs that store nothing: a shadow run whose
+    stored plan already agreed, a plan whose steps looked sensitive, an outage. So a caller
+    that is about to do the slow thing anyway calls this on the way past. The file is only
+    rewritten when something actually expired, so the usual case costs one read.
+    """
+    try:
+        path = _path(namespace)
+        if path is None or not path.is_file():
+            return 0
+        entries = _load(path)
+        now = time.time()
+        kept = {name: entry for name, entry in entries.items()
+                if -_CLOCK_SKEW_S <= now - _at(entry) <= float(ttl_s)}
+        if len(kept) == len(entries):
+            return 0
+        _save(path, kept)
+        return len(entries) - len(kept)
+    except Exception:  # noqa: BLE001 - housekeeping never costs the caller the call it was making
+        return 0
+
+
 def drop(namespace: str, k: str) -> None:
     """Forget one entry. Used when what was stored turned out to be wrong."""
     try:
