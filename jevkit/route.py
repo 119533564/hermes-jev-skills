@@ -15,7 +15,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from . import catalog as catalog_mod
 from . import client, ladder, privacy
@@ -417,8 +417,38 @@ def _features(prompt: str, context_tokens: int) -> Dict[str, Any]:
 _DECISIONS: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
 
-def _cache_key(ask: str, profile: Optional[str], only_provider: Optional[str], has_images: bool, pinned: bool) -> str:
-    material = "\x00".join([ask, str(profile), str(only_provider), str(has_images), str(pinned), POLICY_VERSION])
+# Two things the key used to leave out, both reported by a reader of the code (issue #3):
+#
+# The CONTEXT SIZE. A hit returns before `_pick` runs, so the context-fit check and the
+# "large context never switches down" guard were both skipped. A repeated short instruction
+# - a cron turn, "continue", a template - is first seen in a small context and again once
+# the session has grown, and the second turn was answered from the first: a 300,000-token
+# turn routed to a model with a 32,000-token window. Bucketed rather than exact, because an
+# exact size would make every turn a miss and the cache pointless.
+#
+# The CONFIG. Editing tiers in routing.json changed nothing until the process restarted,
+# which reads as "my edit did not work".
+_CONTEXT_BUCKETS = (4_000, 16_000, 32_000, 64_000, 128_000, 200_000, 400_000, 1_000_000)
+
+
+def _context_bucket(context_tokens: int) -> int:
+    for edge in _CONTEXT_BUCKETS:
+        if context_tokens < edge:
+            return edge
+    return 0                                   # bigger than every bucket: its own class
+
+
+def _config_fingerprint(config: Mapping[str, Any]) -> str:
+    """The parts of the config that can change which model comes back."""
+    material = json.dumps({k: config.get(k) for k in ("tiers", "exclude", "escalate", "sticky_context_tokens")},
+                          sort_keys=True, default=str)
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _cache_key(ask: str, profile: Optional[str], only_provider: Optional[str], has_images: bool, pinned: bool,
+               context_tokens: int = 0, config: Optional[Mapping[str, Any]] = None) -> str:
+    material = "\x00".join([ask, str(profile), str(only_provider), str(has_images), str(pinned), POLICY_VERSION,
+                            str(_context_bucket(context_tokens)), _config_fingerprint(config or {})])
     return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
 
 
@@ -485,12 +515,16 @@ def decide(
     # A recurring job repeats its instruction verbatim, so buy the decision once and reuse it.
     cache_key = None
     if config.get("cache_repeat_asks", True):
-        cache_key = _cache_key(ask, profile, only_provider, has_images, bool(pinned))
+        cache_key = _cache_key(ask, profile, only_provider, has_images, bool(pinned), context_tokens, config)
         cached = _DECISIONS.get(cache_key)
         if cached is not None:
             return _with_escalation({**cached, "cached": True}, config)
-    risky = bool(_HARD_RISK.search(privacy.normalize(ask)))
-    private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(ask)
+    # Both of these read the WHOLE turn, not the clipped copy that gets sent. `ask` keeps
+    # the opening and the end, so "drop the production database" in the middle of a long
+    # paste tripped neither guard: the turn routed to the cheapest tier and its text was
+    # sent as ordinary text. What is clipped is what Jev reads, never what we check.
+    risky = bool(_HARD_RISK.search(privacy.normalize(inner)))
+    private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(inner)
     mode = "features" if private else config.get("mode", "redacted-text")
     state: Any = (
         {"turn_features": _features(ask, context_tokens)} if mode == "features"

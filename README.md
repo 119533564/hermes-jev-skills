@@ -90,7 +90,7 @@ The page lives on an unguessable one-time URL, refuses requests with a foreign `
 
 Jev is a cloud API, so this is spelled out rather than implied:
 
-- **Routing**: the user's turn, redacted (emails, phones, tokens, long hex masked), capped at 3,000 characters. Never history, tool results, files or memory. Turns that look like they hold a secret, and any profile you list in `private_profiles`, send only coarse features: length, whether code is present, whether risk words appear.
+- **Routing**: the user's turn, redacted (emails, phones, tokens, long hex masked), capped at 2,500 characters (`ask_chars`), read as the opening and, mostly, the end. Never history, tool results, files or memory. Turns that look like they hold a secret, and any profile you list in `private_profiles`, send only coarse features: length, whether code is present, whether risk words appear.
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
@@ -98,6 +98,8 @@ Jev is a cloud API, so this is spelled out rather than implied:
 - **Computer and browser use**: the goal, short element labels, and your action descriptions. Never screenshots, page text or field values. A goal or label that looks sensitive is refused before sending.
 
 Logs hold decisions only (tier, model, confidence, latency). Never prompt text.
+
+One thing to be plain about: in the default `redacted-text` mode, routing sends the turn itself, redacted. The plugin also tells your agent never to send Jev customer data — and on an automatically routed turn the agent has no say in that, because routing happens before it acts. If a profile handles data that must not leave the machine, put it in `private_profiles`, which sends only coarse features (length, code present, risk words) and never the text.
 
 ## Everything fails open
 

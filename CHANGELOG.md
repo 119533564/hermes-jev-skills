@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.17.0 (2026-09-20)
+
+Everything here was found by people reading the code from outside, in the first week this
+repo had anyone else looking at it. Reported by [@MrJev](https://github.com/MrJev) in
+[#3](https://github.com/kerpopule/hermes-jev-skills/issues/3) and
+[@tontontimiro](https://github.com/tontontimiro) in
+[#2](https://github.com/kerpopule/hermes-jev-skills/issues/2), each with a reproduction.
+
+**Two real bugs**
+
+- **A cached routing decision could send a turn to a model that cannot hold it.** The cache
+  key left out the context size, and a hit returns before the model is picked, so the
+  context-fit check and the "a large context never switches down" guard were both skipped.
+  The trigger is ordinary: a repeated short instruction — a cron turn, "continue", a
+  template — seen first in a small context and again once the session has grown. Measured:
+  a 300,000-token turn routed to a model with a 32,000-token window. The key now carries a
+  coarse context bucket, and a fingerprint of the pools, so editing `routing.json` takes
+  effect without restarting the process.
+- **Compaction batched by turn count, so a non-Latin transcript lost whole batches and
+  reported `ok`.** 40 turns of Japanese encode to about 120,000 characters against a 60,000
+  limit; every batch failed as `state_too_large` while `"ok" if calls` let one good batch
+  hide the rest, leaving those turns at the fail-open default. `rerank.py` learned this in
+  its own docstring and compaction never got it. Batches are now packed by encoded size,
+  and a run where some batches failed reports **`partial`** with the ids left `unjudged`.
+
+**Guards that were reading the wrong copy**
+
+- The risk-word floor and the "does this look sensitive" check both ran on the *clipped*
+  copy of a long turn, not the whole thing. A destructive instruction in the middle of a
+  long paste tripped neither: it routed to the cheapest tier, and its text was sent as
+  ordinary text. What is clipped is what Jev reads, never what we check.
+
+**Three claims that were not true**
+
+- `jev-skill-select` said "two requests". It is two round trips but `ceil(skills / 120) + 1`
+  requests, sent side by side — for the 377-skill catalog in the README, five. Wall clock
+  and billed requests are not the same number, and it is the requests you pay for.
+- The README said routing is capped at 3,000 characters; `ask_chars` is 2,500.
+- The README now says plainly that in the default `redacted-text` mode, an automatically
+  routed turn sends its own text — so the plugin's instruction to the agent about customer
+  data is not something the agent can act on, and `private_profiles` is the control.
+
+**Already fixed before the report arrived**, and worth recording because it was found twice
+independently: `jev ask` returning `http_400` for the list question shape its help
+advertises ([#2](https://github.com/kerpopule/hermes-jev-skills/issues/2), fixed in 0.16.0),
+and CI red for eight runs on `opener=subprocess.run` bound as a default argument
+(fixed earlier today).
+
+**For contributors**
+
+- `SECURITY.md`, issue templates, a PR template, and a `CONTRIBUTING.md` that opens with
+  the two things that have bitten every contributor here: a green run locally is not a green
+  run on CI, and Jev's confidence is calibrated while a chat model's is not.
+- `scripts/triage_github.py` reads the open PRs and issues, checks what a maintainer checks
+  first, ranks them with Jev, and writes a report with a draft reply for anything waiting.
+  It posts nothing.
+
+
 ## 0.16.0 (2026-09-20)
 
 **Jev through OpenRouter, so it can be one key instead of two**

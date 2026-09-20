@@ -62,6 +62,7 @@ When the size is fixed and something has to go: a small local writer, a context 
 - Nothing is dropped unless Jev was confident (0.7+). An unjudged turn is marked summarize, never drop. Summarize still means clipped to 400 characters.
 - Turns that look like they hold a secret are not sent to Jev.
 - Jev down: every turn comes back `summarize`. That is a worse input than the plain transcript, so on `status: "fail_open"` use the plain transcript instead.
+- **`status: "partial"`** means some batches answered and some did not; the ids in `unjudged` sat at the `summarize` default with nobody judging them. Treat it like `fail_open` unless `unjudged` is short and you can see it does not cover the turns you care about. It used to report `ok` in this case, so one good batch hid every failed one.
 
 ## When to compact at all
 

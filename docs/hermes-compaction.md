@@ -33,7 +33,7 @@ from jevkit import compact
 
 recent = messages[-240:]                       # 40 turns per Jev request, one after another
 selection = compact.select(recent, keep_last=8, timeout=10)
-if selection["status"] == "ok":
+if selection["status"] == "ok":               # "partial" means some batches failed: treat it like fail_open
     body, marked = compact.digest(recent, selection, limit=24000), True
 else:
     body, marked = plain_tail(messages), False  # on fail_open the digest is worse than the plain text

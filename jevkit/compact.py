@@ -13,6 +13,7 @@ not expect it to improve a handoff, and see `handoff.recovery_block` for what di
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -20,6 +21,13 @@ from . import client, privacy
 
 TURN_CHARS = 700
 BATCH = 40
+# Counting turns is not enough, the same lesson rerank.py learned first: the client measures
+# the JSON-ENCODED state, and one CJK character encodes to six. A 40-turn Japanese batch
+# came to 120,601 characters against a 60,000 limit, so every batch failed as
+# state_too_large while the result still said "ok" (reported as issue #3). Leave room for
+# the questions, which repeat the three fate descriptions for every turn.
+STATE_BUDGET = 40_000
+_PER_TURN_OVERHEAD = 16
 FATE = {
     "keep": "Carries a decision, a constraint, a user preference, an unfinished task, an exact value, path, id, "
             "command or error that later work depends on",
@@ -37,6 +45,23 @@ def _text(message: Mapping[str, Any]) -> str:
     return content if isinstance(content, str) else ("" if content is None else str(content))
 
 
+def _pack(messages: Sequence[Mapping[str, Any]], judged: Sequence[int]) -> List[List[int]]:
+    """Group turn indexes into requests that fit, by encoded size and not by count."""
+    batches: List[List[int]] = []
+    current: List[int] = []
+    used = 0
+    for index in judged:
+        cost = len(json.dumps(privacy.redact(_text(messages[index]), TURN_CHARS))) + _PER_TURN_OVERHEAD
+        if current and (len(current) >= BATCH or used + cost > STATE_BUDGET):
+            batches.append(current)
+            current, used = [], 0
+        current.append(index)
+        used += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
 def select(
     messages: Sequence[Mapping[str, Any]], *, keep_last: int = 6, timeout: float = 8.0,
     transport: Optional[client.Transport] = None,
@@ -51,8 +76,8 @@ def select(
             fates[index] = "keep"
     judged = [i for i in judged if fates[i] != "keep" and _text(messages[i]).strip()]
 
-    calls, errors, latency = 0, [], 0
-    for group in client.batches(judged, BATCH):
+    calls, errors, latency, judged_ok = 0, [], 0, set()
+    for group in _pack(messages, judged):
         sendable = [i for i in group if not privacy.is_sensitive(_text(messages[i]))]
         if not sendable:
             continue
@@ -67,6 +92,7 @@ def select(
             continue
         calls += 1
         latency += reply["latency_ms"]
+        judged_ok.update(sendable)
         for i in sendable:
             answer = reply["answers"][f"t{i}"]
             # Dropping is the only irreversible fate, so it needs a confident answer.
@@ -75,8 +101,18 @@ def select(
             fates[i] = answer["choice"]
 
     counts = {fate: sum(1 for value in fates.values() if value == fate) for fate in FATE}
-    return {"status": "ok" if calls or not judged else "fail_open", "fates": {str(k): v for k, v in sorted(fates.items())},
-            "counts": counts, "jev_calls": calls, "errors": errors, "latency_ms": latency}
+    # "ok" used to mean "at least one batch worked", so one good batch hid every failed one
+    # and forty turns sat at the fail-open default while the caller was told all was well.
+    # The compaction skill tells an agent to use the plain transcript on anything but ok.
+    if not judged:
+        status = "ok"
+    elif not calls:
+        status = "fail_open"
+    else:
+        status = "partial" if errors else "ok"
+    return {"status": status, "fates": {str(k): v for k, v in sorted(fates.items())},
+            "counts": counts, "jev_calls": calls, "errors": errors, "latency_ms": latency,
+            "unjudged": sorted(i for i in judged if i not in judged_ok)}
 
 
 def digest(messages: Sequence[Mapping[str, Any]], selection: Mapping[str, Any], limit: int = 24000) -> str:
