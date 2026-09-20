@@ -926,6 +926,23 @@ class RecoveryBlockTests(unittest.TestCase):
                       digest=lambda messages, selection, limit: "[KEEP VERBATIM] user: x", runner=self.runner)
         self.assertTrue(seen["marked"])
 
+    def test_a_confidential_lane_keeps_the_narrow_read(self):
+        """The wide read was measured at 1,200 words. A confidential capsule is 400 whatever
+        the writer saw, so widening it would send far more of a customer's conversation to
+        the auxiliary model and buy nothing."""
+        self.turns = 400                       # ~26,000 characters, over the narrow budget
+        seen: Dict[str, Any] = {}
+
+        def prompt_for(body: str, previous: str = "", *, confidential: bool = False, marked: bool = True) -> str:
+            seen[confidential] = len(body)
+            return body
+        self.ho.build("s1", "lane", write=lambda p: self.CAPSULE, prompt_for=prompt_for,
+                      valid=lambda t: True, confidential=True, scrub=lambda s: s, runner=self.runner)
+        self.ho.build("s1", "other", write=lambda p: self.CAPSULE, prompt_for=prompt_for, runner=self.runner)
+        self.assertLessEqual(seen[True], self.ho.CONFIDENTIAL_TRANSCRIPT_CHARS)
+        self.assertGreater(seen[False], self.ho.CONFIDENTIAL_TRANSCRIPT_CHARS)
+        self.assertLessEqual(seen[False], self.ho.TRANSCRIPT_CHARS)
+
     def test_an_older_jevkit_without_the_marked_flag_still_gets_a_capsule(self):
         def old_prompt_for(body: str, previous: str = "", *, confidential: bool = False) -> str:
             return "PROMPT " + body

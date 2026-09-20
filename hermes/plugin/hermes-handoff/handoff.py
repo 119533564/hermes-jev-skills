@@ -34,6 +34,12 @@ TRIGGERS = frozenset({"handoff", "hand off", "hand-off"})
 # 58.7% closed-book against 48.1% for that, and 75.0% against 68.3% with one search. The
 # longest of those sessions was 118,000 characters of dialogue, about a cent to read.
 TRANSCRIPT_CHARS = 300_000
+# A confidential lane keeps the old, narrower read. Its capsule is a 400-word breadcrumb
+# whatever the writer saw, and at 400 words the measurement says reading everything is worth
+# nothing (46.2% against 48.1% for the tail). The gain was at 1,200 words, which these lanes
+# do not get. So widening it would send far more of a customer's conversation to the
+# auxiliary model to buy nothing, and "no measured benefit" is not a good enough reason.
+CONFIDENTIAL_TRANSCRIPT_CHARS = 24_000
 CAPSULE_MAX_CHARS = 12_000
 # Jev judges 40 turns per request, one request after another. A 600-turn lane was 15
 # sequential calls of up to 8 s before the writer even started. The compaction hook has
@@ -350,6 +356,7 @@ def build(
     # `jev` travels with the result because status "ok" only means a capsule was written.
     # A Jev outage still writes one, from an unfiltered transcript, and whoever reads the
     # report has to be able to tell that night from a good one.
+    budget = CONFIDENTIAL_TRANSCRIPT_CHARS if confidential else TRANSCRIPT_CHARS
     jev_calls, counts, jev, jev_errors = 0, {}, "not_used", []
     marked = False                  # does `body` carry [KEEP VERBATIM] / [background] tags?
     if select and digest:
@@ -360,13 +367,13 @@ def build(
             jev_calls = selection.get("jev_calls") or 0
             jev = str(selection.get("status") or "ok")
             jev_errors = list(selection.get("errors") or [])
-            body = digest(recent, selection, TRANSCRIPT_CHARS)
+            body = digest(recent, selection, budget)
             marked = True
         except Exception as error:  # noqa: BLE001
             jev, jev_errors = "error", [type(error).__name__]
-            body = _plain(messages)
+            body = _plain(messages, budget)
     else:
-        body = _plain(messages)
+        body = _plain(messages, budget)
 
     previous = ""
     existing = capsule_path(lane)
@@ -512,10 +519,10 @@ def recovery_block(session_id: str, messages: List[Dict[str, str]]) -> str:
         "when the value came from one."])
 
 
-def _plain(messages: List[Dict[str, str]]) -> str:
+def _plain(messages: List[Dict[str, str]], limit: int = TRANSCRIPT_CHARS) -> str:
     # No tags: nothing marked these lines, and the prompt is told so (marked=False).
     joined = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
-    return joined[-TRANSCRIPT_CHARS:]
+    return joined[-limit:]
 
 
 # ── handing it to the next session ───────────────────────────────────────────

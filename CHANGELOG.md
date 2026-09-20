@@ -40,6 +40,15 @@ A mailbox sorter, ported from someone else's app and changed where our own numbe
   two failure directions — a human's mail filed under promotional, and a newsletter that
   wakes someone up.
 
+## 0.15.1 (2026-09-20)
+
+- **A confidential lane keeps the narrow transcript read.** 0.14.0 widened what the writer
+  sees to 300,000 characters on the strength of a measurement taken at 1,200 words. A
+  confidential capsule is a 400-word breadcrumb whatever the writer saw, and at 400 words
+  reading everything measured at 46.2% against 48.1% for the tail. On a deployment bound by
+  a continuity rule that would have sent far more of a customer's conversation to the
+  auxiliary model to buy nothing. `CONFIDENTIAL_TRANSCRIPT_CHARS` is 24,000.
+
 ## 0.14.0 (2026-09-20)
 
 We measured our own handoff claim, it was wrong, and what ships now is what won.
