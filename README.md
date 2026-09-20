@@ -121,6 +121,7 @@ hermes/plugin/     the Hermes plugin
 router-dashboard/  the model routing page (`jev dashboard`)
 install.py         installer / uninstaller
 tests/             offline tests, every Jev reply faked
+scripts/           the release gate, the demo home, and a nightly report on open PRs and issues
 evals/             measurements you can rerun on your own sessions
 docs/              integration notes and hard-won operational lessons
 ```

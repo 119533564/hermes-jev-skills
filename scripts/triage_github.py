@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,10 +40,23 @@ TIMEOUT = 60
 BODY_CHARS = 2_000
 STALE_DAYS = 7
 
-# Words that mean "a person has to look at this tonight", checked before Jev so the answer
-# does not depend on a network call.
-URGENT_WORDS = ("vulnerability", "security", "exploit", "injection", "leak", "leaked",
-                "credential", "api key", "password", "private data", "data loss", "corrupt")
+# What "a person has to read this tonight" looks like, checked before Jev so the answer does
+# not depend on a network call.
+#
+# The first version scanned the body for words like "security", "credential" and "leak".
+# Against a busy repo that flagged 8 of the first 10 items and 88 of 100 as needing a
+# person, because those are ordinary words in an ordinary bug report — "the credential is
+# not read from the right place", "memory leak". A report that cries wolf is one nobody
+# reads, which is the failure this whole script exists to avoid. So: a phrase that only
+# occurs in an actual report, anywhere; or a plain word, but only in the TITLE, where
+# somebody chose it deliberately.
+URGENT_PHRASES = ("vulnerability", "responsible disclosure", "security advisory", "exploit",
+                  "proof of concept", "cve", "rce", "privilege escalation", "arbitrary code",
+                  "leaked key", "leaked token", "leaked credential", "exposes the key",
+                  "customer data", "personal data", "data loss")
+URGENT_TITLE_WORDS = ("security", "vulnerability", "exploit", "injection", "leak", "leaked",
+                      "credential", "api key", "password", "exfiltrat")
+SECURITY_LABELS = ("security", "vulnerability", "privacy")
 
 
 def gh_json(args: List[str]) -> Any:
@@ -73,11 +87,33 @@ def _text(item: Dict[str, Any]) -> str:
     return f"{item.get('title') or ''}\n{(item.get('body') or '')[:BODY_CHARS]}"
 
 
+def _whole(needle: str, haystack: str, inflected: bool = False) -> bool:
+    """`needle` as a whole word or phrase, so a short token cannot match inside a longer one.
+
+    "rce" matched inside "force-routes", which is how a keyword scanner becomes noise
+    nobody reads. `inflected` allows the ordinary endings, because "leaks metadata" in a
+    title is the same report as "leak".
+    """
+    tail = r"(?:s|es|ed|ing)?" if inflected else ""
+    pattern = r"(?<![\w-])" + re.escape(needle).replace(r"\ ", r"\s+") + tail + r"(?![\w-])"
+    return re.search(pattern, haystack) is not None
+
+
 def looks_urgent(item: Dict[str, Any]) -> Optional[str]:
-    lowered = _text(item).lower()
-    for word in URGENT_WORDS:
-        if word in lowered:
-            return word
+    """Why this needs reading tonight, or None. Deliberately hard to trigger."""
+    title = (item.get("title") or "").lower()
+    body = (item.get("body") or "")[:BODY_CHARS].lower()
+    for label in (l.get("name", "").lower() for l in (item.get("labels") or [])):
+        if any(word in label for word in SECURITY_LABELS):
+            return f"labelled {label}"
+    for phrase in URGENT_PHRASES:
+        # Word boundaries, not substrings: "rce" matched inside "force-routes", which is
+        # how a keyword scanner turns into noise nobody reads.
+        if _whole(phrase, title) or _whole(phrase, body):
+            return f'says "{phrase.strip()}"'
+    for word in URGENT_TITLE_WORDS:
+        if _whole(word, title, inflected=True):
+            return f'"{word}" in the title'
     return None
 
 
@@ -114,7 +150,7 @@ def read_pr(pr: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
 def _needs_pr(row: Dict[str, Any]) -> List[str]:
     needs = []
     if row["urgent_word"]:
-        needs.append(f"mentions {row['urgent_word']}: read it first, and move it private if it is a real report")
+        needs.append(f"{row['urgent_word']}: read first; if it is a real report, move it private")
     if not row["answered"] and not row["draft"]:
         needs.append(f"nobody has replied in {row['quiet_days']:.0f} day(s)")
     if row["checks"]["state"] == "failing":
@@ -142,7 +178,7 @@ def read_issue(issue: Dict[str, Any], now: Optional[float] = None) -> Dict[str, 
     }
     needs = []
     if row["urgent_word"]:
-        needs.append(f"mentions {row['urgent_word']}: read it first, and move it private if it is a real report")
+        needs.append(f"{row['urgent_word']}: read first; if it is a real report, move it private")
     if not answered:
         needs.append(f"nobody has replied in {row['quiet_days']:.0f} day(s)")
     elif row["quiet_days"] >= STALE_DAYS:
