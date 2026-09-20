@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.15.0 (2026-09-20)
+
+A mailbox sorter, ported from someone else's app and changed where our own numbers disagreed.
+
+**Mailbox sorting (`jev mail`)**
+
+- **What it does.** `triage.py` answers the support question: how urgent, what kind, does a
+  person have to decide. This answers the inbox question: of these thousands of messages,
+  which is even addressed to me as a person. Five lanes — **needs reply / updates /
+  promotional / sales / spam** — plus urgency, whether a human wrote it, and a
+  `needs_attention` flag. One Jev request per message.
+- **Where it came from.** [jevmail](https://github.com/fazlerocks/jevmail) (MIT, Copyright
+  (c) 2026 Fazle Rahman) sorts Gmail through the Vercel AI Gateway in a Next.js app. The
+  lane taxonomy, the three question shapes and the two header signals are theirs and are
+  credited in `jevkit/mailbox.py`. The app, the gateway and the Gmail OAuth flow are not
+  part of this: our path is Python straight to `api.typesafe.ai` with the key in the OS
+  store, and nothing here needs Node, Vercel or a browser.
+- **Kept because they earn their place.** The five lanes, because "needs reply" versus
+  "promotional" is the split that decides whether anyone opens the thing. Two free signals
+  in the state: whether the mail carries an unsubscribe header, and whether the recipient
+  has already replied in the thread — a thread we started is never cold outreach. Per-answer
+  probabilities kept next to the verdict, so a correction can be read against what Jev said.
+- **Changed because our measurements said so.** jevmail stores urgency as
+  `round(score) + 1`. On a live bank alert Jev answered with a *flat* urgency distribution,
+  confidence 0.0, point estimate 2.73 — which that formula stores as 4 of 5, a level nobody
+  chose. Here the mass at "today" and "blocked" is what a caller acts on, the point estimate
+  is reported as what it is, and a spread within 0.15 of the runner-up is marked unsure.
+- **The address is never sent.** Not the mailbox, not the local part. The domain and a
+  locally-derived `sender_class` (automated / list / person) carry what the lane question
+  needs; a message that looks like it holds a secret is not sent at all and is flagged for a
+  person instead. Fail-open means a person looks, never that mail disappears: a Jev failure,
+  a secret, or an answer outside the lane set all set `needs_attention` true and say why.
+- **Measured.** 11 real-shaped messages end to end: 435 ms p50, 562 ms p90, $0.00021
+  estimated for the batch, and the lane matched the hand label on all 11 — including a
+  phishing mail read as spam, a colleague asking for a total read as needs_reply, and the
+  credential one, which was never sent.
+- Tested offline: 13 cases in `tests/test_mailbox.py`, every Jev reply faked, including the
+  two failure directions — a human's mail filed under promotional, and a newsletter that
+  wakes someone up.
+
 ## 0.14.0 (2026-09-20)
 
 We measured our own handoff claim, it was wrong, and what ships now is what won.

@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, memo, plan, rerank, replay, route, skillpick, spend, supervise, triage
+from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, mailbox, memo, plan, rerank, replay, route, skillpick, spend, supervise, triage
 
 
 def _stdin_json() -> Any:
@@ -267,6 +267,23 @@ def cmd_triage(args: argparse.Namespace) -> int:
     if args.summary:
         return _out(triage.summarize(rows))
     return _out({"summary": triage.summarize(rows), "messages": rows})
+
+
+def cmd_mail(args: argparse.Namespace) -> int:
+    """Sort a mailbox into lanes: which mail is even addressed to me as a person."""
+    if args.file:
+        raw = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        messages = raw if isinstance(raw, list) else raw.get("messages") or raw.get("items") or []
+    else:
+        raw = _stdin_json()
+        messages = raw if isinstance(raw, list) else raw.get("messages") or [raw]
+    messages = [m for m in messages if isinstance(m, dict)]
+    if not messages:
+        raise SystemExit("no messages to sort")
+    rows = mailbox.classify_many(messages, workers=args.workers, timeout=args.timeout)
+    if args.summary:
+        return _out(mailbox.summarize(rows))
+    return _out({"summary": mailbox.summarize(rows), "messages": rows})
 
 
 def cmd_spend(args: argparse.Namespace) -> int:
@@ -538,6 +555,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--summary", action="store_true", help="counts only, no per-message rows")
     p.set_defaults(func=cmd_triage)
+
+    p = sub.add_parser("mail", help="sort a mailbox into lanes: needs reply / updates / promotional / sales / spam")
+    p.add_argument("--file", help="JSON list of messages (subject, content/snippet, sender, headers); else read stdin")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--timeout", type=float, default=6.0)
+    p.add_argument("--summary", action="store_true", help="counts only, no per-message rows")
+    p.set_defaults(func=cmd_mail)
 
     p = sub.add_parser("spend", help="weekly cost report: what ran, what it cost, what would have been cheaper")
     p.add_argument("--usage", action="append", help="JSON export of metered usage rows (repeatable)")

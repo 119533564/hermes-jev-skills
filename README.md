@@ -20,10 +20,16 @@ That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model
 | **Choosing turns** | Which turns to keep when a transcript must be cut to a fixed size | 71 turns in 0.95 s; beat choosing by recency 11 questions to 4 |
 | **Skill selection** | Which installed skill this turn needs, or none | 377 skills in ~2.8 s; acknowledgements answered locally for free |
 | **Triage** | How urgent a message is, what kind it is, and whether a person must see it | ~0.4 s per message, $0.00006 |
+| **Mailbox sorting** | Which lane an inbox message belongs in — needs reply, updates, promotional, sales, spam — and whether it is worth a person's attention | ~0.44 s p50 per message, $0.00002 each |
 | **Computer use** | The next GUI action, from a table of actions you already judged safe. `--plan` splits a multi-step command once, up front | ~0.5 s per decision |
 | **Browser use** | The next page action, same contract | ~0.4 s per step |
 
 Eight skills ship as plain `SKILL.md` files, so they are not Hermes-only. The same folder works in Claude Code, Codex, or anything that reads a skill file.
+
+```bash
+jev mail --file inbox.json             # sort a mailbox into lanes
+jev mail --file inbox.json --summary   # counts per lane, what was unsure, what it cost
+```
 
 ## Try it in two commands
 
@@ -88,6 +94,7 @@ Jev is a cloud API, so this is spelled out rather than implied:
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
+- **Mailbox sorting** (`jev mail`): the subject and up to 2,500 characters of the body, redacted, plus the sender's **domain** and a local class (automated / list / person), whether the mail carries an unsubscribe header, and whether you have replied in the thread. The mailbox address itself is never sent, and a message that looks like it holds a secret is not sent at all.
 - **Computer and browser use**: the goal, short element labels, and your action descriptions. Never screenshots, page text or field values. A goal or label that looks sensitive is refused before sending.
 
 Logs hold decisions only (tier, model, confidence, latency). Never prompt text.
@@ -133,4 +140,4 @@ python3 -m unittest discover -s tests
 
 ## License
 
-MIT. Jev and TypeSafe are products of TypeSafe AI; this project is independent. The optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled.
+MIT. Jev and TypeSafe are products of TypeSafe AI; this project is independent. The optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled. The mailbox lanes in `jevkit/mailbox.py` are ported from [fazlerocks/jevmail](https://github.com/fazlerocks/jevmail) (MIT, Copyright (c) 2026 Fazle Rahman).
