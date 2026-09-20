@@ -2,6 +2,12 @@
 
 ## 0.15.1 (2026-09-20)
 
+- **`scripts/demo_home.py` builds the home the README screenshot should come from**: five
+  invented profiles, a pool set that shows a fall-through and two empty cells, and twelve
+  decisions for the live view. The image in the README was taken from a real machine under a
+  caption calling it demo data, which is how a working fleet's model strategy got published.
+  Point the dashboard at the output and everything on screen comes from that one file.
+
 - **A confidential lane keeps the narrow transcript read.** 0.14.0 widened what the writer
   sees to 300,000 characters on the strength of a measurement taken at 1,200 words. A
   confidential capsule is a 400-word breadcrumb whatever the writer saw, and at 400 words

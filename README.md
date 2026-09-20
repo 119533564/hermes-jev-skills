@@ -8,7 +8,7 @@ That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model
 
 ![The model routing dashboard: the Jev on/shadow/off switch, the routing pools grid, and live decisions as they happen](docs/images/model-routing-dashboard.png)
 
-*`jev dashboard`. The profiles, paths and decisions shown are a demo home; the pools are a real working set. One switch for Jev routing, every pool as a tier-by-work-kind grid, and each decision as it happens (tier, work kind, model, which pool it came from, confidence, latency).*
+*`jev dashboard`. The profiles, paths and decisions here are a demo home; the pools are a real working set. `python3 scripts/demo_home.py` builds a home where nothing is real, which is where the next one comes from. One switch for Jev routing, every pool as a tier-by-work-kind grid, and each decision as it happens (tier, work kind, model, which pool it came from, confidence, latency).*
 
 ## What Jev decides, and what it costs
 
