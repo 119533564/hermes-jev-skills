@@ -648,5 +648,38 @@ class MailCommandTests(unittest.TestCase):
         self.assertIn("lanes", self.rows(text))
 
 
+class MixedEncodingFooterTests(unittest.TestCase):
+    """A real newsletter is quoted-printable text AND percent-encoded URLs at once."""
+
+    def wire(self, body):
+        seen = {}
+
+        def transport(raw, headers, timeout):
+            seen["state"] = json.loads(raw)["state"]
+            return json.dumps({"answers": {"lane": {"type": "choice", "choice": "promotional",
+                               "confidence": 0.9, "probabilities": {"promotional": 0.9, "spam": 0.1}}},
+                               "usage": {}}).encode()
+        mailbox.classify({"id": "m1", "subject": "This week", "body": body,
+                          "from": "news@probe-sender.test"}, transport=transport)
+        return json.dumps(seen["state"])
+
+    def test_one_undecodable_byte_does_not_abandon_the_whole_decode(self):
+        """`&h=9f3c` in an unsubscribe URL decodes to a byte that is not valid UTF-8. Giving
+        up on the decode over that byte left the recipient's own address, written
+        `mailbox.owner=40probe-recipient.test`, readable on the wire."""
+        body = ("Three teardowns inside.\n"
+                "Unsubscribe: https://l.test/u/?e=mailbox.owner%40probe-recipient.test&h=9f3c\n"
+                "Reply to mailbox.owner=40probe-recipient.test\n"
+                "Sent to mailbox.owner@probe-recipient.test")
+        sent = self.wire(body)
+        for marker in ("mailbox.owner", "probe-recipient.test", "=40probe"):
+            self.assertNotIn(marker, sent)
+        self.assertIn("[email]", sent)
+
+    def test_a_body_that_is_not_encoded_at_all_is_still_readable(self):
+        sent = self.wire("The invoice totals 40 units at 9 each. Reply when you have checked it.")
+        self.assertIn("The invoice totals 40 units at 9 each", sent)
+
+
 if __name__ == "__main__":
     unittest.main()

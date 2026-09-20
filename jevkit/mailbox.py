@@ -178,9 +178,19 @@ def readable(text: str) -> str:
     out = text
     if _QP_HINT.search(out):
         try:
-            out = quopri.decodestring(out.encode("utf-8")).decode("utf-8")
-        except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+            decoded = quopri.decodestring(out.encode("utf-8", "replace"))
+        except ValueError:
+            decoded = None
+        if decoded is None:
             out = re.sub(r"=\r?\n", "", out)
+        else:
+            # errors="replace", not a bare decode. A real newsletter mixes an unsubscribe
+            # URL with quoted-printable text, and one of its URL parameters ("&h=9f3c")
+            # decodes to a byte that is not valid UTF-8. Giving up on the whole decode over
+            # that one byte left `mailbox.owner=40probe-recipient.test` - the recipient's
+            # own address - readable on the wire. A replacement character costs a character
+            # of a sentence nobody reads; the alternative costs the address.
+            out = decoded.decode("utf-8", "replace")
     if _PERCENT_HINT.search(out):
         try:
             out = urllib.parse.unquote(out, errors="strict")
