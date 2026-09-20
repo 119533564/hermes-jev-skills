@@ -777,8 +777,21 @@ def window_of(windows: list[dict], app_name: str) -> dict | None:
     return front_window(exact or loose)
 
 
-def wait_for_window(driver: Driver, app_name: str, timeout: float = 8.0, sleep=time.sleep) -> dict | None:
+# A default argument is bound once, when the module is imported, so `opener=subprocess.run`
+# could not be replaced afterwards. The tests thought they had faked it and had not: on macOS
+# they ran the REAL /usr/bin/open and opened System Settings on whoever ran them, and on Linux
+# the same call died with ENOENT and turned CI red. Resolve these at call time instead.
+def _opener(given):
+    return given or subprocess.run
+
+
+def _sleeper(given):
+    return given or time.sleep
+
+
+def wait_for_window(driver: Driver, app_name: str, timeout: float = 8.0, sleep=None) -> dict | None:
     """The window of the app a direct op just opened, so the next step knows where to act."""
+    sleep = _sleeper(sleep)
     found = None
     # Counted polls rather than a wall-clock deadline, so the wait is exactly as long as
     # the sleeps it was given. A listing costs about 3 ms on top.
@@ -807,7 +820,7 @@ def default_browser() -> str:
 
 
 def window_after_open_url(driver: Driver, before: dict, browser: str | None = None,
-                          timeout: float = 3.0, sleep=time.sleep) -> dict | None:
+                          timeout: float = 3.0, sleep=None) -> dict | None:
     """Which window did the address open in? Nobody said which browser.
 
     The first version took "whatever is in front afterwards". Live, `open` loaded the page
@@ -817,6 +830,7 @@ def window_after_open_url(driver: Driver, before: dict, browser: str | None = No
     If that cannot be answered, accept only a window that visibly changed (it is new, or
     its title is not what it was before the open); never the front window on faith.
     """
+    sleep = _sleeper(sleep)
     bundle = default_browser() if browser is None else browser
     pids: set = set()
     if bundle:
@@ -852,13 +866,14 @@ def _aim(driver: Driver, where: dict) -> bool:
 
 
 def run_direct(driver: Driver, where: dict, session: str, step: dict,
-               opener=subprocess.run, sleep=time.sleep, browser: str | None = None) -> tuple[bool, str]:
+               opener=None, sleep=None, browser: str | None = None) -> tuple[bool, str]:
     """One step that needs no on-screen target. Returns (ok, detail).
 
     ``step`` has been through jevkit.plan.clean_step, and every value is checked again
     here at the point of use: this is the function that hands a model-written string to
     the operating system.
     """
+    opener, sleep = _opener(opener), _sleeper(sleep)
     kind = step.get("kind")
     if kind in ("open_app", "open_url"):
         if sys.platform != "darwin":
@@ -948,7 +963,7 @@ def forget_plan(goal: str, outcome: dict) -> None:
 
 
 def run_plan(driver: Driver, where: dict, args: argparse.Namespace, values: list[str],
-             regions_cap: int, *, planner=None, opener=subprocess.run, sleep=time.sleep) -> dict:
+             regions_cap: int, *, planner=None, opener=None, sleep=None) -> dict:
     """Plan once, then run each step directly or through the Jev loop.
 
     Returns what run_goal returns, plus ``report`` for the --json result and ``planned_for``,
@@ -956,6 +971,7 @@ def run_plan(driver: Driver, where: dict, args: argparse.Namespace, values: list
     calls for the WHOLE command, not per step, so a plan cannot turn a bounded run into
     steps x budget.
     """
+    opener, sleep = _opener(opener), _sleeper(sleep)
     windows = list_windows(driver)
     front = front_window(windows)
     running: list[str] = []

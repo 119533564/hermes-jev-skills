@@ -795,6 +795,57 @@ class TextHelperTests(unittest.TestCase):
 
 
 @unittest.skipIf(gui.jev_plan is None, "jevkit.plan is not importable here")
+@unittest.skipIf(gui.jev_plan is None, "jevkit.plan is not importable here")
+class FakeIsReallyUsedTests(unittest.TestCase):
+    """The fakes in this file have to be the only thing these tests touch.
+
+    `run_plan(..., opener=subprocess.run)` bound the real function as a DEFAULT ARGUMENT,
+    at import, so patching `gui.subprocess.run` afterwards changed nothing. On macOS the
+    tests then ran the real `/usr/bin/open -a "System Settings"` and opened that app on
+    whoever ran them; on Linux the same call was ENOENT, so three tests failed and CI went
+    red for every push. Both went unnoticed because the suite was green on the machine that
+    wrote it.
+    """
+
+    def steps(self):
+        return [{"kind": "open_app", "target": "System Settings"}]
+
+    def test_patching_the_module_is_enough_to_stop_a_step_shelling_out(self):
+        """No opener= is passed here, exactly as main() calls it."""
+        fake = FakeOpen()
+        driver = FakeDriver(state=dict(STATE, window_title="Storage"))
+        with mock.patch.object(gui.subprocess, "run", fake), \
+                mock.patch.object(gui, "jev_choose", pick("click:")), \
+                mock.patch.object(gui.sys, "platform", "darwin"), \
+                mock.patch.object(gui.time, "sleep", lambda s: None), \
+                mock.patch.object(gui, "default_browser", lambda: "com.apple.safari"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            out = gui.run_plan(driver, {"pid": None, "window_id": None},
+                               plan_args("Open System Settings"), [], gui.MAX_REGIONS,
+                               planner=planner(self.steps()))
+        self.assertEqual([s["ok"] for s in out["report"]["steps"]], [True],
+                         out["report"]["steps"][0].get("detail"))
+        self.assertEqual(fake.commands, [[gui.OPEN, "-a", "System Settings"]])
+
+    def test_the_same_holds_for_the_sleep_between_polls(self):
+        """`sleep=time.sleep` was bound the same way, so a patched sleep was ignored and a
+        failing poll loop waited for real. Here the window is never found, so the loop runs
+        to its end: every wait must land in the fake."""
+        slept = []
+        driver = FakeDriver()                      # no Calculator window will ever appear
+        with mock.patch.object(gui.subprocess, "run", FakeOpen()), \
+                mock.patch.object(gui, "jev_choose", pick("click:")), \
+                mock.patch.object(gui.sys, "platform", "darwin"), \
+                mock.patch.object(gui.time, "sleep", lambda s: slept.append(s)), \
+                mock.patch.object(gui, "default_browser", lambda: "com.apple.safari"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            out = gui.run_plan(driver, {"pid": None, "window_id": None},
+                               plan_args("Open Calculator"), [], gui.MAX_REGIONS,
+                               planner=planner([{"kind": "open_app", "target": "Calculator"}]))
+        self.assertFalse(out["report"]["steps"][0]["ok"])
+        self.assertGreaterEqual(len(slept), 20)    # the whole 8 s wait, in the fake, instantly
+
+
 class PlanCacheRunnerTests(unittest.TestCase):
     """A cached plan is served for a week, so a run that went wrong must not leave one behind."""
 
