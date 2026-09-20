@@ -20,6 +20,13 @@ from . import keystore
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
+# Jev, reached through OpenRouter's Decisions API instead of TypeSafe directly: one key
+# instead of two for anyone already on OpenRouter. Same request, same answers, same model -
+# only the URL and the model id differ. Contributed as PR #1 by Lorenzo DZ (@Barba2k2),
+# whose version prompted a chat model for JSON instead; that returns an LLM's guess with a
+# made-up confidence, which is the one thing a decision model exists not to do.
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
+OPENROUTER_MODEL = "~typesafe/jev-latest"
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_STATE_CHARS = 60_000
 USER_AGENT = "hermes-jev-skills/0.1"
@@ -62,8 +69,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
 
 
-def _http_transport(body: bytes, headers: Dict[str, str], timeout: float) -> bytes:
-    request = urllib.request.Request(ENDPOINT, data=body, headers=headers, method="POST")
+def _http_transport(body: bytes, headers: Dict[str, str], timeout: float, url: str = ENDPOINT) -> bytes:
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -77,6 +84,10 @@ def _http_transport(body: bytes, headers: Dict[str, str], timeout: float) -> byt
     if len(raw) > MAX_RESPONSE_BYTES:
         raise JevError("response_too_large")
     return raw
+
+
+def _openrouter_transport(body: bytes, headers: Dict[str, str], timeout: float) -> bytes:
+    return _http_transport(body, headers, timeout, OPENROUTER_ENDPOINT)
 
 
 _RETRYABLE = {"rate_limited", "overloaded", "network", "http_500", "http_502", "http_503", "http_504"}
@@ -138,6 +149,7 @@ def ask(
     retries: int = 1,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    provider: Optional[str] = None,
     transport: Optional[Transport] = None,
 ) -> Dict[str, Any]:
     """Ask Jev every question against one state, in a single request.
@@ -148,20 +160,29 @@ def ask(
     """
     if not questions:
         raise ValueError("no questions")
-    key = api_key or keystore.resolve()
+    via = provider or ("typesafe" if api_key else keystore.provider())
+    if via not in keystore.PROVIDERS:
+        via = "typesafe"
+    key = api_key or keystore.resolve(via)
     if not key:
         raise JevError("no_key", "run `jev setup-key`")
     encoded_state = state if isinstance(state, str) else json.dumps(state, separators=(",", ":"), default=str)
     if len(encoded_state) > MAX_STATE_CHARS:
         raise JevError("state_too_large")
+    default_model = OPENROUTER_MODEL if via == "openrouter" else DEFAULT_MODEL
     body = json.dumps(
-        {"state": state, "model": model or os.environ.get("TYPESAFE_MODEL") or DEFAULT_MODEL,
+        {"state": state, "model": model or os.environ.get("TYPESAFE_MODEL") or default_model,
          "questions": {name: dict(q) for name, q in questions.items()}},
         separators=(",", ":"), default=str,
     ).encode("utf-8")
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                "Accept": "application/json", "User-Agent": USER_AGENT}
-    send = transport or _http_transport
+    if via == "openrouter":
+        # OpenRouter asks callers to identify themselves; neither header carries anything
+        # about the person or the decision.
+        headers["HTTP-Referer"] = "https://github.com/kerpopule/hermes-jev-skills"
+        headers["X-Title"] = "Hermes Jev Skills"
+    send = transport or (_openrouter_transport if via == "openrouter" else _http_transport)
 
     started = time.monotonic()
     attempt = 0
@@ -190,11 +211,12 @@ def ask(
     return {"answers": checked, "usage": usage, "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
-def verify_key(api_key: str, timeout: float = 10.0) -> bool:
-    """One tiny synthetic call. True means the key is accepted."""
+def verify_key(api_key: str, timeout: float = 10.0, provider: str = "typesafe") -> bool:
+    """One tiny synthetic call. True means the key is accepted by that provider."""
     try:
         ask("The build finished and all tests passed.",
-            {"ok": noul("The text reports a successful outcome")}, api_key=api_key, timeout=timeout)
+            {"ok": noul("The text reports a successful outcome")},
+            api_key=api_key, provider=provider, timeout=timeout)
         return True
     except JevError:
         return False

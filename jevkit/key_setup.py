@@ -25,6 +25,10 @@ from urllib.parse import parse_qs
 from . import client, keystore
 
 KEYS_URL = "https://console.typesafe.ai/settings/keys"
+# Jev is also served through OpenRouter, which is one key instead of two for anyone already
+# using it for their models. Same page, same secret store, different provider.
+PROVIDER_PAGES = {"typesafe": ("TypeSafe", KEYS_URL, "console.typesafe.ai"),
+                  "openrouter": ("OpenRouter", "https://openrouter.ai/settings/keys", "openrouter.ai")}
 MAX_BODY = 4096
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -44,14 +48,14 @@ button{margin-top:16px;width:100%;padding:12px;border:0;border-radius:9px;backgr
 </style></head><body><main>__BODY__</main></body></html>"""
 
 _FORM = """<h1>Connect Jev</h1>
-<p>Paste your TypeSafe API key. It goes from this page straight into this computer's secret store.
+<p>Paste your __LABEL__ API key. It goes from this page straight into this computer's secret store.
 Your AI agent never sees it.</p>
 __ERROR__
 <form method="post" autocomplete="off">
-<label for="k">TypeSafe API key</label>
+<label for="k">__LABEL__ API key</label>
 <input id="k" name="key" type="password" required autofocus autocomplete="off" spellcheck="false">
 <button type="submit">Save key</button></form>
-<p class="note">No key yet? Create one at <a href="__KEYS__" target="_blank" rel="noreferrer noopener">console.typesafe.ai</a>.
+<p class="note">No key yet? Create one at <a href="__KEYS__" target="_blank" rel="noreferrer noopener">__HOST__</a>.
 This page is served only by your own machine and closes after one use.</p>"""
 
 _DONE = """<h1 class="ok">Jev is connected</h1>
@@ -62,11 +66,13 @@ def _render(body: str) -> bytes:
     return _PAGE.replace("__BODY__", body).encode("utf-8")
 
 
-def _finish(key: str, verify: bool, hermes: bool, hermes_home: Optional[Path]) -> Dict[str, Any]:
-    verified: Optional[bool] = client.verify_key(key) if verify else None
+def _finish(key: str, verify: bool, hermes: bool, hermes_home: Optional[Path],
+            provider: str = "typesafe") -> Dict[str, Any]:
+    label = PROVIDER_PAGES.get(provider, PROVIDER_PAGES["typesafe"])[0]
+    verified: Optional[bool] = client.verify_key(key, provider=provider) if verify else None
     if verified is False:
-        return {"status": "rejected", "reason": "TypeSafe did not accept that key"}
-    result = keystore.store(key, hermes=hermes, hermes_home=hermes_home)
+        return {"status": "rejected", "reason": f"{label} did not accept that key"}
+    result = keystore.store(key, hermes=hermes, hermes_home=hermes_home, provider=provider)
     result.update({"status": "stored", "verified": verified})
     return result
 
@@ -74,7 +80,14 @@ def _finish(key: str, verify: bool, hermes: bool, hermes_home: Optional[Path]) -
 def run_browser(
     *, host: str = "127.0.0.1", port: int = 0, timeout: float = 600.0, open_browser: bool = True,
     verify: bool = True, hermes: bool = True, hermes_home: Optional[Path] = None,
+    provider: str = "typesafe",
 ) -> Dict[str, Any]:
+    label, keys_url, keys_host = PROVIDER_PAGES.get(provider, PROVIDER_PAGES["typesafe"])
+
+    def form(error: str = "") -> bytes:
+        return _render(_FORM.replace("__ERROR__", error).replace("__KEYS__", keys_url)
+                       .replace("__LABEL__", label).replace("__HOST__", keys_host))
+
     token = secrets.token_urlsafe(24)
     outcome: Dict[str, Any] = {}
     done = threading.Event()
@@ -110,7 +123,7 @@ def run_browser(
             if not self._allowed() or done.is_set():
                 self._send(404, _render("<h1>Not found</h1>"))
                 return
-            self._send(200, _render(_FORM.replace("__ERROR__", "").replace("__KEYS__", KEYS_URL)))
+            self._send(200, form())
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._allowed() or done.is_set():
@@ -123,14 +136,20 @@ def run_browser(
             fields = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             key = (fields.get("key") or [""])[0].strip()
             try:
-                result = _finish(key, verify, hermes, hermes_home)
+                result = _finish(key, verify, hermes, hermes_home, provider)
             except ValueError as error:
                 result = {"status": "rejected", "reason": str(error)}
+            except Exception as error:  # noqa: BLE001
+                # Anything else is our bug, but the person is sitting in front of a browser
+                # with a key in the clipboard: an exception here closed the connection with
+                # no response and no way to tell what happened. The reason is the exception
+                # TYPE only; its message could quote the key back onto the page.
+                result = {"status": "rejected", "reason": f"could not store the key ({type(error).__name__})"}
             if result["status"] != "stored":
                 message = f'<p class="bad">{html.escape(str(result["reason"]))}. Try again.</p>'
-                self._send(200, _render(_FORM.replace("__ERROR__", message).replace("__KEYS__", KEYS_URL)))
+                self._send(200, form(message))
                 return
-            note = " and checked with TypeSafe" if result.get("verified") else ""
+            note = f" and checked with {label}" if result.get("verified") else ""
             self._send(200, _render(_DONE.replace("__VERIFIED__", note)))
             outcome.update(result)
             done.set()
@@ -165,11 +184,13 @@ def run_browser(
     return outcome if finished else {"status": "timed_out"}
 
 
-def run_tty(*, verify: bool = True, hermes: bool = True, hermes_home: Optional[Path] = None) -> Dict[str, Any]:
+def run_tty(*, verify: bool = True, hermes: bool = True, hermes_home: Optional[Path] = None,
+            provider: str = "typesafe") -> Dict[str, Any]:
     if not sys.stdin.isatty():
         return {"status": "rejected", "reason": "no terminal; use the browser flow"}
-    key = getpass.getpass("TypeSafe API key (hidden): ").strip()
+    label = PROVIDER_PAGES.get(provider, PROVIDER_PAGES["typesafe"])[0]
+    key = getpass.getpass(f"{label} API key (hidden): ").strip()
     try:
-        return _finish(key, verify, hermes, hermes_home)
+        return _finish(key, verify, hermes, hermes_home, provider)
     except ValueError as error:
         return {"status": "rejected", "reason": str(error)}

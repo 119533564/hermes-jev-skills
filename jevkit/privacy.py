@@ -30,6 +30,18 @@ _TOKEN_SHAPES = re.compile(
 )
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+# The keyword rules above only fire on a label. A bank alert or an order receipt carries
+# the card number with no trigger word anywhere near it, and "4111 1111 1111 1111" went
+# out verbatim. Luhn is what keeps this from eating order and reference numbers — the
+# same trap the _TRACKING comment below documents, reached from the other direction.
+_CARD = re.compile(r"(?<![\d.-])(?:\d[ -]?){12,18}\d(?![\d.-])")
+# _PHONE is a North American shape: three, three, four. Two lines of a European signature
+# ("+44 20 7946 0958", "+33 1 70 18 99 00") walked straight past it.
+_INTL_PHONE = re.compile(r"(?<![\d+])\+\d{1,3}[\s.-]?(?:\d[\s.-]?){7,13}\d(?!\d)")
+# A credential with no label at all: an AWS secret access key is 40 base64 characters and
+# the word "secret" never appears beside it in a mail. Mixed case AND a digit is what
+# separates it from a word, a hex digest (already [hex] by the time this runs) or a slug.
+_HIGH_ENTROPY = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/=_-])")
 # A UPS tracking number's digit tail parses as country-code + 3 + 3 + 4, so the phone rule
 # ate it: "1Z999AA10123456784" became "1Z999AA[phone]". Those numbers are the operational
 # spine of a shipping desk and a redactor that silently destroys them looks like it worked.
@@ -41,6 +53,32 @@ _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{
 # because the phone pattern's trailing (?!\d) refuses to match a prefix of a longer run.
 _TRACKING = re.compile(r"\b1Z[0-9A-Z]{16}\b", re.IGNORECASE)
 _LONG_HEX = re.compile(r"\b[a-fA-F0-9]{32,}\b")
+
+
+def _luhn(digits: str) -> bool:
+    """The check digit every payment card carries. An order number almost never passes it."""
+    total, alternate = 0, False
+    for char in reversed(digits):
+        value = ord(char) - 48
+        if alternate:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+        alternate = not alternate
+    return total % 10 == 0
+
+
+def _mask_card(match: "re.Match[str]") -> str:
+    digits = re.sub(r"\D", "", match.group(0))
+    return "[card]" if 13 <= len(digits) <= 19 and _luhn(digits) else match.group(0)
+
+
+def _mask_credential(match: "re.Match[str]") -> str:
+    run = match.group(0)
+    mixed = (any(c.isupper() for c in run) and any(c.islower() for c in run)
+             and any(c.isdigit() for c in run))
+    return "[secret]" if mixed else run
 
 
 def normalize(text: str) -> str:
@@ -70,8 +108,13 @@ def redact(text: str, limit: int = 4000) -> str:
     # Keep the variable's NAME (it is often the useful signal) and mask only its value.
     out = _SECRET_ASSIGNMENT.sub(lambda m: re.split(r"[:=]", m.group(0), 1)[0].rstrip() + "=[secret]", out)
     out = _LONG_HEX.sub("[hex]", out)
+    # After [hex], so a digest stays a digest, and before the phone rules, so a spaced
+    # card number is not shredded into a "phone" and a remainder.
+    out = _HIGH_ENTROPY.sub(_mask_credential, out)
+    out = _CARD.sub(_mask_card, out)
     out = _EMAIL.sub("[email]", out)
     out = _PHONE.sub("[phone]", out)
+    out = _INTL_PHONE.sub("[phone]", out)
     for index, value in enumerate(held):
         out = out.replace(f"\x00TRK{index}\x00", value)
     if len(out) > limit:

@@ -1,20 +1,46 @@
-"""The mailbox sorter: it must never lose a person's mail to a tray.
+"""The mailbox sorter: it must never lose a person's mail to a tray, or a person's
+address to the cloud API.
 
-Two ways to fail. File a human's message under promotional and it is never read. Cry
-wolf on every newsletter and the attention flag means nothing. Both are tested here, and
-so is the reason this module exists at all: urgency decided on probability mass, because
-a flat distribution has no rounded level that means anything.
+Three ways to fail. File a human's message under promotional and it is never read. Cry
+wolf on every newsletter and the attention flag means nothing. Put the recipient's own
+address on the wire while the README promises you do not, and the privacy claim is a
+story. All three are tested here, and so is the reason this module exists at all: urgency
+decided on probability mass, because a flat distribution has no rounded level that means
+anything.
+
+Every Jev reply here is a fake transport, and the key is patched out at module level:
+client.ask resolves the credential *before* it consults the transport, so a fake transport
+alone still shells out to the real macOS Keychain and the file passes only on a machine
+that has run `jev setup-key`.
 """
+import base64
+import io
 import json
-import os
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from jevkit import client, mailbox  # noqa: E402
+from jevkit import cli, client, keystore, mailbox  # noqa: E402
+
+KEY = "apikey_" + "a1" * 30
+
+# The suite must behave the same on a machine with a real key and on one with none. Seven
+# of the thirteen cases here used to read the developer's Keychain and fail on CI.
+_key_patch = mock.patch.object(keystore, "resolve", return_value=KEY)
+
+
+def setUpModule():
+    _key_patch.start()
+
+
+def tearDownModule():
+    _key_patch.stop()
 
 
 def fake(answer_for):
@@ -31,20 +57,27 @@ def fake(answer_for):
     return transport
 
 
-def jev(lane="needs_reply", urgency=0.5, spread=None, personal=0.9, confidence=0.95):
+def jev(lane="needs_reply", urgency=0.5, spread=None, personal=0.9, confidence=0.95,
+        lane_probs=None, urgency_confidence=0.9):
     """Answer with a lane, an urgency distribution, and P(written by a human)."""
     spread = spread or {int(urgency): 1.0}
 
     def answer(name, question, state):
         if name == "lane":
+            probabilities = lane_probs if lane_probs is not None else {
+                k: (0.9 if k == lane else 0.0) for k in question["criteria"]}
             return {"type": "choice", "choice": lane, "confidence": confidence,
-                    "probabilities": {k: (0.9 if k == lane else 0.0) for k in question["criteria"]}}
+                    "probabilities": probabilities}
         if name == "urgency":
             avg = sum(level * p for level, p in spread.items())
-            return {"type": "score", "score": avg, "confidence": 0.9,
+            return {"type": "score", "score": avg, "confidence": urgency_confidence,
                     "probabilities": {str(k): v for k, v in spread.items()}}
         return {"type": "noul", "noul": personal}
     return fake(answer)
+
+
+# Addresses below are all in .test, which RFC 2606 reserves and nobody can receive at.
+OWNER = "mailbox.owner@probe-recipient.test"
 
 
 class MailboxTests(unittest.TestCase):
@@ -52,7 +85,7 @@ class MailboxTests(unittest.TestCase):
         out = mailbox.classify(
             {"subject": "Re: invoice 2041 - can you check the totals?",
              "content": "Can you confirm line 3 before I send it? Need it today.",
-             "sender": "dana@northside-partners.com"},
+             "sender": "dana@northside-partners.test"},
             transport=jev(lane="needs_reply", spread={3: 0.6, 4: 0.2, 2: 0.2}))
         self.assertEqual(out["lane"], "needs_reply")
         self.assertTrue(out["needs_attention"])
@@ -62,27 +95,31 @@ class MailboxTests(unittest.TestCase):
         out = mailbox.classify(
             {"subject": "5 growth loops that still work",
              "content": "This week: pay social, three teardowns. Unsubscribe any time.",
-             "sender": "hello@growthweekly.co"},
+             "sender": "hello@growthweekly.test"},
             transport=jev(lane="promotional", spread={0: 1.0}, personal=0.05))
         self.assertEqual(out["lane"], "promotional")
         self.assertFalse(out["needs_attention"])
         self.assertFalse(out["low_confidence"])
 
-    def test_a_reply_we_started_is_never_cold_outreach(self):
-        """The header signal earns its place here: same words, different answer."""
+    def test_the_state_block_carries_the_two_header_signals_and_no_mailbox_address(self):
+        """Renamed from test_a_reply_we_started_is_never_cold_outreach, which asserted
+        nothing about the answer. It could not: no rule in the module reads these signals
+        back, and the module filed that message under `sales` with or without the label.
+        The signals are *sent*; the docstring no longer claims they move the answer."""
         transport = jev(lane="sales", spread={1: 0.9}, personal=0.4)
         mailbox.classify({"subject": "Re: schedule for October", "content": "Can you confirm the room?",
-                          "sender": "kelsey@freshsheet.co", "labels": ["INBOX", "SENT"]},
+                          "sender": "kelsey@freshsheet.test", "labels": ["INBOX", "SENT"]},
                          transport=transport)
         state = transport.calls[0]["state"]
         self.assertTrue(state["user_replied_in_thread"])
         self.assertFalse(state["has_unsubscribe_header"])
-        self.assertEqual(state["from_domain"], "freshsheet.co")
+        self.assertEqual(state["from_domain"], "freshsheet.test")
         self.assertEqual(state["sender_class"], "person")
 
     def test_a_human_writing_in_is_lifted_out_of_junk_whatever_the_lane_said(self):
         out = mailbox.classify(
-            {"subject": "quick question", "content": "are you free thursday?", "sender": "priya.r@gmail.com"},
+            {"subject": "quick question", "content": "are you free thursday?",
+             "sender": "priya.r@mailhost.test"},
             transport=jev(lane="promotional", spread={2: 0.7, 3: 0.3}, personal=0.93))
         self.assertEqual(out["lane"], "needs_reply")
         self.assertTrue(out["low_confidence"])
@@ -92,14 +129,12 @@ class MailboxTests(unittest.TestCase):
         """The spread and the point estimate disagree, and the spread is the one that matters.
 
         On a live bank alert Jev answered with a *flat* urgency distribution, confidence
-        0.0, point estimate 2.7. jevmail stores `round(score) + 1`, so that landed at 4 of
-        5 — a level nobody chose — from an answer that said nothing at all. Two examples
-        here differ by 0.2 in the mass at the top but 1.3 in the point estimate; the mass is
-        what a caller acts on, and the estimate is reported as what it is.
+        0.0, point estimate 2.73. jevmail stores `round(score) + 1`, so that landed at 4 of
+        5 — a level nobody chose — from an answer that said nothing at all.
         """
         calm = mailbox.classify(
             {"subject": "Weekly activity summary", "content": "Here is a summary of your account activity.",
-             "sender": "no-reply@notify.bank.com"},
+             "sender": "no-reply@notify.bank.test"},
             transport=jev(lane="updates", spread={0: 0.4, 1: 0.2, 2: 0.2, 3: 0.2}, personal=0.03))
         self.assertEqual(calm["lane"], "updates")
         self.assertAlmostEqual(calm["urgent_mass"], 0.2, places=3)
@@ -107,22 +142,92 @@ class MailboxTests(unittest.TestCase):
 
         pressing = mailbox.classify(
             {"subject": "Card declined: action needed", "content": "Your card was declined at the pump.",
-             "sender": "no-reply@notify.bank.com"},
+             "sender": "no-reply@notify.bank.test"},
             transport=jev(lane="updates", spread={1: 0.1, 2: 0.5, 3: 0.2, 4: 0.2}, personal=0.03))
         self.assertAlmostEqual(pressing["urgent_mass"], 0.4, places=3)
         self.assertGreater(pressing["urgency"], calm["urgency"])
-        self.assertAlmostEqual(calm["urgency"] - pressing["urgency"], -1.3, places=2)
+
+    def test_two_answers_with_the_same_point_estimate_are_split_by_the_mass_alone(self):
+        """The claim the module is named for, isolated from the fake's arithmetic. The
+        previous assertion here pinned `calm - pressing == -1.3`, which is a property of
+        the test helper's own averaging, not of anything in mailbox.py."""
+        shared = {"subject": "the room", "content": "can you confirm?", "sender": "d@partner.test"}
+        spread_out = mailbox.classify(shared, transport=jev(
+            lane="needs_reply", spread={0: 0.45, 4: 0.55}))          # mean 2.2, mass at top
+        bunched = mailbox.classify(shared, transport=jev(
+            lane="needs_reply", spread={2: 0.6, 1: 0.2, 3: 0.2}))    # mean 2.0, mass in the middle
+        self.assertAlmostEqual(spread_out["urgency"], bunched["urgency"], delta=0.3)
+        self.assertTrue(spread_out["needs_attention"])
+        self.assertFalse(bunched["needs_attention"])
+
+    def test_an_account_alert_at_the_top_of_the_rubric_reaches_the_attention_flag(self):
+        """Every example this module was built from — a fraud alert, an OTP, "card
+        declined" — is an `updates` message by its own taxonomy. Gating the urgency
+        computation on `lane == "needs_reply"` made it inert in exactly that lane."""
+        out = mailbox.classify(
+            {"subject": "Unusual sign-in blocked", "content": "Confirm within 24 hours or the card is locked.",
+             "sender": "alerts@notify.bank.test"},
+            transport=jev(lane="updates", spread={4: 1.0}, personal=0.02))
+        self.assertEqual(out["lane"], "updates")
+        self.assertAlmostEqual(out["urgent_mass"], 1.0, places=3)
+        self.assertTrue(out["needs_attention"])
+        self.assertIn("urgent mass 1.00", out["reason"])
+
+    def test_a_coin_flip_between_spam_and_a_person_still_gets_a_person_looking(self):
+        """Escalating only for needs_reply and updates covered the two lanes where being
+        wrong is harmless and skipped the three where a misfile means nobody ever reads
+        the message."""
+        for top, runner in (("spam", "promotional"), ("promotional", "sales"), ("sales", "spam")):
+            out = mailbox.classify(
+                {"subject": "invoice attached", "content": "please see attached", "sender": "x@y.test"},
+                transport=jev(lane=top, personal=0.1,
+                              lane_probs={top: 0.40, runner: 0.39, "updates": 0.21}))
+            self.assertEqual(out["lane"], top)
+            self.assertTrue(out["low_confidence"], top)
+            self.assertTrue(out["needs_attention"], top)
+
+    def test_an_uncalibrated_answer_does_not_drop_mail_into_a_disposal_lane_unseen(self):
+        """Jev's own confidence, the guard triage.py already has. A peaked but
+        uncalibrated spam verdict used to be filed silently."""
+        out = mailbox.classify({"subject": "you won", "content": "claim your prize", "sender": "x@y.test"},
+                               transport=jev(lane="spam", personal=0.1, confidence=0.0,
+                                             lane_probs={"spam": 0.9, "promotional": 0.1}))
+        self.assertEqual(out["lane"], "spam")
+        self.assertTrue(out["needs_attention"])
+
+    def test_a_lane_answer_with_no_probability_mass_is_unsure_not_certain(self):
+        """`client._check_answer` accepts `probabilities: {}`, so this shape arrives. It
+        was read as a runner-up gap of 1.0 — the one case with no evidence at all treated
+        as the most confident answer the module can produce."""
+        for probabilities in ({}, {"needs_reply": 0.2}):
+            out = mailbox.classify({"subject": "hi", "content": "there", "sender": "a@b.test"},
+                                   transport=jev(lane="needs_reply", lane_probs=probabilities))
+            self.assertEqual(out["runner_up_gap"], 0.0, probabilities)
+            self.assertTrue(out["low_confidence"], probabilities)
+            self.assertTrue(out["needs_attention"], probabilities)
+
+    def test_a_flat_urgency_spread_is_marked_unsure_rather_than_urgent(self):
+        """The literal incident from the commit that added this module: point estimate
+        2.73, confidence 0.0, probability mass uniform across the five levels. Uniform
+        puts exactly 0.4 at "today"+"blocked", which is URGENT_MASS, so it came back
+        needs_attention True with low_confidence False and a reason quoting 3.7/5 as
+        though it were a reading."""
+        out = mailbox.classify(
+            {"subject": "Re: the numbers", "content": "let me know when you can",
+             "sender": "dana@partner.test"},
+            transport=jev(lane="needs_reply", spread={0: 0.2, 1: 0.2, 2: 0.2, 3: 0.2, 4: 0.2},
+                          urgency_confidence=0.0))
+        self.assertAlmostEqual(out["urgent_mass"], 0.4, places=3)
+        self.assertTrue(out["low_confidence"])
+        self.assertIn("too flat to read", out["reason"])
+        self.assertNotIn("urgent mass", out["reason"])
 
     def test_an_unsure_lane_is_flagged_rather_than_filed(self):
-        def answer(name, question, state):
-            if name == "lane":
-                return {"type": "choice", "choice": "updates", "confidence": 0.5,
-                        "probabilities": {"updates": 0.48, "promotional": 0.45, "sales": 0.07}}
-            if name == "urgency":
-                return {"type": "score", "score": 0.5, "confidence": 0.8, "probabilities": {"1": 1.0}}
-            return {"type": "noul", "noul": 0.2}
-        out = mailbox.classify({"subject": "fyi", "content": "something happened", "sender": "x@y.com"},
-                               transport=fake(answer))
+        out = mailbox.classify({"subject": "fyi", "content": "something happened", "sender": "x@y.test"},
+                               transport=jev(lane="updates", spread={1: 1.0}, personal=0.2,
+                                             confidence=0.5,
+                                             lane_probs={"updates": 0.48, "promotional": 0.45,
+                                                         "sales": 0.07}))
         self.assertTrue(out["low_confidence"])
         self.assertTrue(out["needs_attention"])
         self.assertIn("unsure", out["reason"])
@@ -130,7 +235,7 @@ class MailboxTests(unittest.TestCase):
     def test_a_message_carrying_a_secret_is_not_sent_anywhere(self):
         transport = jev()
         out = mailbox.classify({"subject": "credentials", "content": "the password is hunter2, please reset it",
-                                "sender": "s@customer.com"}, transport=transport)
+                                "sender": "s@customer.test"}, transport=transport)
         self.assertFalse(out["sent_to_jev"])
         self.assertTrue(out["needs_attention"])
         self.assertEqual(transport.calls, [])
@@ -138,62 +243,409 @@ class MailboxTests(unittest.TestCase):
     def test_jev_down_means_a_person_looks_not_that_the_mail_vanishes(self):
         def down(body, headers, timeout):
             raise client.JevError("network")
-        out = mailbox.classify({"subject": "hello", "content": "anything", "sender": "a@b.com"}, transport=down)
+        out = mailbox.classify({"subject": "hello", "content": "anything", "sender": "a@b.test"}, transport=down)
         self.assertIsNone(out["lane"])
         self.assertTrue(out["needs_attention"])
         self.assertIn("unavailable", out["reason"])
 
-    def test_a_lane_outside_the_closed_set_cannot_be_filed(self):
-        """The client refuses an answer that was not offered, so this never reaches a tray."""
-        out = mailbox.classify({"subject": "hi", "content": "there", "sender": "a@b.com"},
+    def test_a_transport_that_crashes_is_one_row_not_a_traceback(self):
+        """`classify` documents "Never raises" and caught only JevError.
+        http.client.IncompleteRead on a truncated reply is not an OSError, so the real
+        transport could hand this up and the caller got a crash."""
+        def torn(body, headers, timeout):
+            raise RuntimeError("socket died mid-read")
+        out = mailbox.classify({"subject": "hi", "content": "there", "sender": "a@b.test"}, transport=torn)
+        self.assertTrue(out["needs_attention"])
+        self.assertIn("RuntimeError", out["reason"])
+        self.assertIn("a person should look", out["reason"])
+
+    def test_one_message_that_crashes_does_not_take_the_batch_with_it(self):
+        """ThreadPoolExecutor.map re-raises on the first result, so `jev mail` on a flaky
+        connection exited with a traceback and every message in the batch was unsorted
+        and unreported."""
+        good = jev(lane="updates", spread={0: 1.0}, personal=0.05)
+
+        def flaky(body, headers, timeout):
+            if b"detonate" in body:
+                raise RuntimeError("socket died mid-read")
+            return good(body, headers, timeout)
+
+        messages = [{"id": i, "subject": "detonate" if i == 2 else f"note {i}",
+                     "content": "body", "sender": "a@b.test"} for i in range(5)]
+        rows = mailbox.classify_many(messages, workers=2, transport=flaky)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([r["id"] for r in rows], [0, 1, 2, 3, 4])
+        self.assertIn("RuntimeError", rows[2]["reason"])
+        self.assertTrue(rows[2]["needs_attention"])
+        self.assertEqual([r["lane"] for r in rows if r["id"] != 2], ["updates"] * 4)
+
+    def test_an_answer_the_client_refuses_reaches_a_person_rather_than_a_tray(self):
+        """Renamed. The client rejects a choice that was not offered before `classify`
+        ever sees a lane, so this never exercised the module's own closed-set guard — and
+        it asserted only "a person should look", which the no_key, network and malformed
+        paths all produce."""
+        out = mailbox.classify({"subject": "hi", "content": "there", "sender": "a@b.test"},
                                transport=jev(lane="urgent_but_not_a_lane"))
         self.assertIsNone(out["lane"])
         self.assertTrue(out["needs_attention"])
-        self.assertIn("a person should look", out["reason"])
+        self.assertIn("malformed", out["reason"])
 
-    def test_an_empty_message_costs_nothing(self):
-        transport = jev()
-        out = mailbox.classify({"subject": "", "content": "", "sender": "a@b.com"}, transport=transport)
+    def test_the_closed_set_guard_holds_if_the_client_ever_stops_validating(self):
+        """The branch the test above was named for. It is unreachable through client.ask,
+        so it is reached here on purpose: this is the guard for a future client that
+        stops checking, and it should be covered or deleted, not assumed."""
+        invented = {"answers": {
+            "lane": {"type": "choice", "choice": "urgent", "confidence": 0.9,
+                     "probabilities": {"urgent": 0.9}},
+            "urgency": {"type": "score", "score": 1.0, "confidence": 0.9, "probabilities": {1: 1.0}},
+            "personal": {"type": "noul", "noul": 0.1}}, "usage": {}, "latency_ms": 5}
+        with mock.patch.object(mailbox.client, "ask", return_value=invented):
+            out = mailbox.classify({"subject": "hi", "content": "there", "sender": "a@b.test"})
         self.assertIsNone(out["lane"])
-        self.assertFalse(out["needs_attention"])
+        self.assertTrue(out["needs_attention"])
+        self.assertTrue(out["low_confidence"])
+        self.assertIn("unknown lane (urgent)", out["reason"])
+
+    def test_a_message_with_nothing_to_read_still_reaches_a_person(self):
+        """Was test_an_empty_message_costs_nothing, which asserted needs_attention False
+        and so pinned the one behaviour that contradicted the module's fail-open promise.
+        An attachment-only mail, an HTML-only body the parser did not fill and a truncated
+        sync all arrive this way. Costing nothing is still asserted: Jev is not called."""
+        transport = jev()
+        out = mailbox.classify({"subject": "", "content": "", "sender": "a@b.test"}, transport=transport)
+        self.assertIsNone(out["lane"])
+        self.assertTrue(out["needs_attention"])
+        self.assertIn("nothing to read", out["reason"])
         self.assertEqual(transport.calls, [])
+
+    def test_every_return_path_has_the_same_keys_because_the_cli_emits_them_as_json(self):
+        """A consumer reading row["urgent_mass"] or row["runner_up_gap"] got a KeyError on
+        exactly the rows that need a person to look."""
+        def down(body, headers, timeout):
+            raise client.JevError("network")
+        rows = {
+            "success": mailbox.classify({"subject": "s", "content": "b"}, transport=jev()),
+            "empty": mailbox.classify({"subject": "", "content": ""}, transport=jev()),
+            "secret": mailbox.classify({"subject": "s", "content": "the password is hunter2"},
+                                       transport=jev()),
+            "jev down": mailbox.classify({"subject": "s", "content": "b"}, transport=down),
+        }
+        expected = set(mailbox.blank_row())
+        self.assertEqual(len(expected), 13)
+        for name, row in rows.items():
+            self.assertEqual(set(row), expected, name)
+
+
+class WhatLeavesTheMachineTests(unittest.TestCase):
+    """The README promises the mailbox address is never sent and that a message that looks
+    like it holds a secret is not sent at all. The only test that guarded the first claim
+    asserted `"@" not in json.dumps(state)` against a parcel notice containing no address,
+    so it would have passed with redaction deleted entirely. These cases have something to
+    leak, in the encodings mail actually arrives in.
+    """
+
+    def wire(self, message):
+        transport = jev(lane="promotional", spread={0: 1.0}, personal=0.05)
+        mailbox.classify(message, transport=transport)
+        self.assertEqual(len(transport.calls), 1, "nothing was sent")
+        return json.dumps(transport.calls[0]["state"])
+
+    def test_a_newsletter_footer_does_not_put_the_address_on_the_wire_percent_encoded(self):
+        wire = self.wire({
+            "subject": "This week in widgets",
+            "content": ("Three teardowns inside.\n\nUnsubscribe: "
+                        "https://list.probe-sender.test/u/?e=mailbox.owner%40probe-recipient.test&h=9f3c\n"
+                        f"Sent to {OWNER}"),
+            "sender": "news@list.probe-sender.test"})
+        self.assertNotIn("mailbox.owner", wire)
+        self.assertNotIn("probe-recipient.test", wire)
+
+    def test_a_base64_tracking_link_does_not_carry_the_address_through(self):
+        token = base64.b64encode(OWNER.encode()).decode().rstrip("=")
+        wire = self.wire({"subject": "Weekly digest",
+                          "content": f"Read online: https://list.probe-sender.test/u/{token}",
+                          "sender": "news@list.probe-sender.test"})
+        self.assertNotIn(token, wire)
+        self.assertNotIn("mailbox.owner", wire)
+
+    def test_a_quoted_printable_body_does_not_put_the_address_on_the_wire(self):
+        wire = self.wire({"subject": "Re: the order",
+                          "content": "reply to mailbox.owner=40probe-recipient.test please",
+                          "sender": "orders@probe-sender.test"})
+        self.assertNotIn("mailbox.owner", wire)
+        self.assertNotIn("probe-recipient.test", wire)
+
+    def test_a_soft_line_break_inside_an_address_does_not_defeat_the_redactor(self):
+        wire = self.wire({"subject": "Re: the order",
+                          "content": "reply to mailbox.owner@probe-recip=\nient.test please",
+                          "sender": "orders@probe-sender.test"})
+        self.assertNotIn("mailbox.owner", wire)
+        self.assertNotIn("probe-recip", wire)
+
+    def test_html_mail_does_not_leak_the_address_through_an_href(self):
+        wire = self.wire({
+            "subject": "Offers inside",
+            "content": ('<p>Hello</p><a href="https://t.probe-sender.test/o?'
+                        'u=mailbox.owner%40probe-recipient.test">manage preferences</a>'),
+            "sender": "news@probe-sender.test"})
+        self.assertNotIn("mailbox.owner", wire)
+        self.assertNotIn("probe-recipient.test", wire)
+
+    def test_the_footer_still_survives_truncation_so_the_leak_cannot_hide_in_the_tail(self):
+        """redact() keeps head and tail, so a 16k newsletter's footer is *guaranteed* to
+        reach the wire. That is why decoding has to happen before the cap, not after."""
+        state = mailbox.build_state({
+            "subject": "Long digest",
+            "content": ("filler. " * 2000) +
+                       "\nUnsubscribe: https://l.test/u?e=mailbox.owner%40probe-recipient.test",
+            "sender": "news@l.test"})
+        self.assertIn("[…]", state["body"])          # the middle was cut
+        self.assertTrue(state["body"].endswith("[redacted]"))  # and the footer is the tail
+        self.assertNotIn("mailbox.owner", json.dumps(state))
+
+    def test_a_received_header_is_reduced_to_its_timestamp(self):
+        """`received` was the one caller-supplied string in any state block in this repo
+        that was neither redacted nor capped, and a Received: header carries the mailbox
+        address and the internal IP of every hop."""
+        transport = jev()
+        mailbox.classify({"subject": "hi", "content": "hello there", "sender": "a@probe-sender.test",
+                          "received": ("from mx.probe-sender.test (10.4.2.9) by mx.probe-recipient.test "
+                                       f"for <{OWNER}>; Mon, 20 Sep 2026 09:00:00 -0500")},
+                         transport=transport)
+        state = transport.calls[0]["state"]
+        self.assertEqual(state["received"], "Mon, 20 Sep 2026 09:00:00 -0500")
+        self.assertNotIn("10.4.2.9", json.dumps(state))
+        self.assertNotIn("mailbox.owner", json.dumps(state))
+
+    def test_an_ordinary_timestamp_still_reaches_jev(self):
+        transport = jev()
+        mailbox.classify({"subject": "hi", "content": "hello", "sender": "a@b.test",
+                          "received": "2026-09-19T14:00:00Z"}, transport=transport)
+        self.assertEqual(transport.calls[0]["state"]["received"], "2026-09-19T14:00:00Z")
+
+    def test_a_base64_mime_body_carrying_a_key_is_not_forwarded(self):
+        """The credential gate read the raw body, so a base64 Content-Transfer-Encoding
+        body carrying `api_key = sk-...` went to the API whole."""
+        # No token-shaped literal: the keyword alone is what the gate reads, and a real
+        # `sk-...` shape in a test fixture trips scripts/check_release.py on every push.
+        body = base64.b64encode(b"Hi - the api_key for the widget portal is in here.").decode()
+        transport = jev()
+        out = mailbox.classify({"subject": "notes", "content": body, "sender": "a@b.test"},
+                               transport=transport)
+        self.assertFalse(out["sent_to_jev"])
+        self.assertTrue(out["needs_attention"])
+        self.assertEqual(transport.calls, [])
+
+    def test_a_quoted_printable_escape_does_not_walk_a_password_past_the_gate(self):
+        for body in ("the pass=77ord is hunter2", "the pass=\nword is hunter2"):
+            transport = jev()
+            out = mailbox.classify({"subject": "notes", "content": body, "sender": "a@b.test"},
+                                   transport=transport)
+            self.assertFalse(out["sent_to_jev"], body)
+            self.assertEqual(transport.calls, [], body)
+
+    def test_a_bare_card_number_with_no_trigger_word_is_not_sent(self):
+        wire = self.wire({"subject": "Your statement", "content": "charged 4111 1111 1111 1111 on the 4th",
+                          "sender": "statements@probe-sender.test"})
+        self.assertNotIn("4111", wire)
+        self.assertIn("[card]", wire)
+
+    def test_an_international_phone_number_is_not_sent(self):
+        wire = self.wire({"subject": "Re: the call", "content": "ring me on +44 20 7946 0958 tomorrow",
+                          "sender": "d@probe-sender.test"})
+        self.assertNotIn("7946", wire)
+        self.assertIn("[phone]", wire)
+
+    def test_an_unlabelled_credential_is_not_sent(self):
+        wire = self.wire({"subject": "config", "content": "use wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYX here",
+                          "sender": "d@probe-sender.test"})
+        self.assertNotIn("wJalrXUtnFEMIK", wire)
+
+    def test_a_plain_message_is_not_mangled_by_the_decoder(self):
+        wire = self.wire({"subject": "Lunch Thursday?",
+                          "content": "Shall we say 12:30 at the usual place? I can move it if that clashes.",
+                          "sender": "d@probe-sender.test"})
+        self.assertIn("12:30 at the usual place", wire)
 
     def test_the_state_block_is_what_the_sorter_promised(self):
         state = mailbox.build_state({"subject": "Your parcel arrives Tuesday",
-                                     "content": "Track your parcel for the latest.",
-                                     "sender": "tracking@parcelmail.com",
+                                     "content": f"Track your parcel, {OWNER}.",
+                                     "sender": "tracking@parcelmail.test",
                                      "received": "2026-09-19T14:00:00Z"},
                                     has_unsubscribe=True, replied_before=False)
-        self.assertEqual(state["from_domain"], "parcelmail.com")
+        self.assertEqual(state["from_domain"], "parcelmail.test")
+        # The old assertion ran against a message with no address in it at all.
+        self.assertIn("[email]", state["body"])
         self.assertNotIn("@", json.dumps(state))
         self.assertTrue(state["has_unsubscribe_header"])
         self.assertFalse(state["user_replied_in_thread"])
         self.assertEqual(state["sender_class"], "list")  # an unsubscribe header makes it list mail
         self.assertEqual(state["received"], "2026-09-19T14:00:00Z")
 
+
+class BulkSignalTests(unittest.TestCase):
+    def test_a_person_asking_to_be_unsubscribed_is_not_relabelled_as_list_mail(self):
+        """`has_unsubscribe_header` was a regex over the first 800 characters of the body,
+        stored under a header's name. A colleague quoting a newsletter, or asking to be
+        taken off one, was reported to Jev as list mail carrying a header it did not have
+        — and both fields push toward `promotional`, which is the failure this module
+        exists to prevent."""
+        state = mailbox.build_state({
+            "subject": "Please take me off this list",
+            "content": "Hi - could you unsubscribe me from the weekly digest? Thanks, D.",
+            "sender": "dana@example-partners.test"})
+        self.assertFalse(state["has_unsubscribe_header"])
+        self.assertEqual(state["sender_class"], "person")
+        # The hunch is still sent to Jev, under its own name.
+        self.assertTrue(state["body_mentions_unsubscribe"])
+
+    def test_a_real_list_unsubscribe_header_is_the_header_signal(self):
+        state = mailbox.build_state({"subject": "Field notes", "content": "three teardowns inside",
+                                     "sender": "dispatch@weeklyfield.test",
+                                     "headers": "List-Unsubscribe: <https://weeklyfield.test/u>"})
+        self.assertTrue(state["has_unsubscribe_header"])
+        self.assertEqual(state["sender_class"], "list")
+
+    def test_bulk_detection_needs_no_model(self):
+        self.assertTrue(mailbox._has_unsubscribe_header("List-Unsubscribe: <https://x.test/u>"))
+        self.assertTrue(mailbox._has_unsubscribe_header("List-Id: widgets.x.test"))
+        self.assertFalse(mailbox._has_unsubscribe_header("Subject: unsubscribe me please"))
+        self.assertTrue(mailbox._mentions_unsubscribe("hello@x.test", "News", "Unsubscribe at any time"))
+        self.assertFalse(mailbox._mentions_unsubscribe("dana@customer.test", "Invoice totals",
+                                                       "please confirm line 3"))
+
+
+class BatchTests(unittest.TestCase):
+    """classify_many and cmd_mail are the only paths `jev mail` runs, and had no tests."""
+
+    def test_classify_many_attaches_the_source_fields_and_keeps_input_order(self):
+        transport = jev(lane="updates", spread={0: 1.0}, personal=0.05)
+        messages = [{"id": f"m{i}", "subject": f"note {i}", "sender": f"s{i}@probe-sender.test",
+                     "content": "body", "received": "2026-09-19T14:00:00Z"} for i in range(6)]
+        rows = mailbox.classify_many(messages, workers=4, transport=transport)
+        self.assertEqual([r["id"] for r in rows], [f"m{i}" for i in range(6)])
+        self.assertEqual([r["subject"] for r in rows], [f"note {i}" for i in range(6)])
+        self.assertEqual(rows[0]["sender"], "s0@probe-sender.test")
+        self.assertEqual(rows[0]["received"], "2026-09-19T14:00:00Z")
+
     def test_the_summary_counts_lanes_and_names_what_was_unsure(self):
         rows = [
-            mailbox.classify({"subject": "one", "content": "body one", "sender": "a@b.com"},
-                             transport=jev(lane="needs_reply", spread={3: 0.9})),
-            mailbox.classify({"subject": "two", "content": "body two", "sender": "c@d.com"},
-                             transport=jev(lane="promotional", spread={0: 1.0}, personal=0.05)),
-            mailbox.classify({"subject": "", "content": "", "sender": "e@f.com"}, transport=jev()),
+            {"subject": "one", "lane": "needs_reply", "sent_to_jev": True, "latency_ms": 100},
+            {"subject": "two", "lane": "promotional", "sent_to_jev": True, "latency_ms": 200,
+             "low_confidence": True, "runner_up_gap": 0.02, "needs_attention": True},
+            {"subject": "three", "lane": None, "sent_to_jev": False, "latency_ms": None},
         ]
-        for i, row in enumerate(rows):
-            row["subject"] = row.get("subject") or "one"
-            row["id"] = i
         summary = mailbox.summarize(rows)
         self.assertEqual(summary["messages"], 3)
         self.assertEqual(summary["lanes"]["needs_reply"], 1)
         self.assertEqual(summary["lanes"]["promotional"], 1)
         self.assertEqual(summary["lanes"]["unsorted"], 1)
         self.assertEqual(summary["not_sent_to_jev"], 1)
-        self.assertGreaterEqual(summary["cost_estimate_usd"], 0.0)
+        self.assertEqual(summary["needs_attention"], 1)
+        # The name promised this list and the old test never looked at it: deleting the
+        # key from summarize() left that test passing.
+        self.assertEqual(summary["unsure"],
+                         [{"subject": "two", "lane": "promotional", "runner_up_gap": 0.02}])
+        # The arithmetic, not `>= 0.0`, which held for any formula including a constant.
+        self.assertEqual(summary["cost_estimate_usd"], round(3 * 450 * 0.042 / 1e6, 5))
 
-    def test_bulk_detection_needs_no_model(self):
-        self.assertTrue(mailbox._looks_bulk("hello@x.co", "News", "Unsubscribe at any time"))
-        self.assertTrue(mailbox._looks_bulk("alerts@bank.com", "Alert", "your transaction", "List-Unsubscribe: <x>"))
-        self.assertFalse(mailbox._looks_bulk("dana@customer.com", "Invoice totals", "please confirm line 3"))
+    def test_the_summary_caps_the_unsure_list_at_ten(self):
+        rows = [{"subject": f"s{i}", "lane": "spam", "low_confidence": True} for i in range(12)]
+        self.assertEqual(len(mailbox.summarize(rows)["unsure"]), 10)
+
+    def test_the_summary_reports_latency_percentiles_including_a_zero_millisecond_call(self):
+        """The filter was a truthiness test, so a call measured at 0 ms was dropped and
+        the percentile branch never ran under a fake transport at all."""
+        rows = [{"latency_ms": ms} for ms in (0, 0, 0, 100)]
+        # Dropping the three zero-millisecond calls reported p50 100 for this batch.
+        self.assertEqual(mailbox.summarize(rows)["latency_ms"], {"p50": 0, "p90": 100})
+        ten = [{"latency_ms": ms} for ms in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100)]
+        self.assertEqual(mailbox.summarize(ten)["latency_ms"], {"p50": 60, "p90": 100})
+        self.assertEqual(mailbox.summarize([])["latency_ms"], {"p50": None, "p90": None})
+
+
+class MailCommandTests(unittest.TestCase):
+    def run_mail(self, argv, stdin=None):
+        out = io.StringIO()
+        with mock.patch.object(cli.sys, "stdin", io.StringIO(stdin or "")), redirect_stdout(out):
+            code = cli.main(["mail"] + argv)
+        return code, out.getvalue()
+
+    def rows(self, text):
+        return json.loads(text)
+
+    def setUp(self):
+        patcher = mock.patch.object(mailbox, "classify_many",
+                                    side_effect=lambda messages, **kw: [
+                                        dict(mailbox.blank_row(), id=m.get("id"),
+                                             subject=str(m.get("subject") or ""), lane="updates",
+                                             sent_to_jev=True) for m in messages])
+        self.classify_many = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, text):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        handle.write(text)
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
+    def test_an_items_envelope_reads_the_same_from_stdin_and_from_a_file(self):
+        """They disagreed: piped in, `{"items": [...]}` became one empty message and the
+        summary reported a mailbox of one, exit 0, with nothing saying three were lost."""
+        payload = json.dumps({"items": [{"subject": "a", "content": "b"},
+                                        {"subject": "c", "content": "d"},
+                                        {"subject": "e", "content": "f"}]})
+        code, text = self.run_mail(["--summary"], stdin=payload)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.rows(text)["messages"], 3)
+        code, text = self.run_mail(["--summary", "--file", self.write(payload)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.rows(text)["messages"], 3)
+
+    def test_an_empty_envelope_is_refused_the_same_way_on_both_paths(self):
+        for argv, stdin in ((["--summary"], '{"messages": []}'),
+                            (["--summary", "--file", self.write('{"messages": []}')], None)):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_mail(argv, stdin=stdin)
+            self.assertIn("no messages to sort", str(caught.exception))
+
+    def test_an_entry_that_is_not_a_message_object_is_counted_not_silently_dropped(self):
+        payload = json.dumps([{"subject": "one"}, "two", None, {"subject": "three"}, 4])
+        code, text = self.run_mail(["--summary"], stdin=payload)
+        self.assertEqual(code, 0)
+        summary = self.rows(text)
+        self.assertEqual(summary["messages"], 2)
+        self.assertEqual(summary["dropped_not_an_object"], 3)
+
+    def test_bad_input_is_an_invalid_request_on_stdout_not_a_traceback(self):
+        """`jev ask` promises {"error": "invalid_request", ...} and exit 2. This command
+        answered a missing file, a directory, non-UTF-8 bytes and a bare JSON scalar with
+        a raw traceback on stderr and nothing at all on stdout."""
+        cases = [
+            (["--file", "/no/such/file.json"], None),
+            (["--file", str(REPO)], None),
+            (["--file", self.write("not json at all")], None),
+            ([], '"hello"'),
+            ([], "42"),
+            (["--timeout", "nan"], "[]"),
+            (["--timeout", "inf"], "[]"),
+        ]
+        for argv, stdin in cases:
+            code, text = self.run_mail(argv, stdin=stdin)
+            self.assertEqual(code, 2, argv)
+            self.assertEqual(self.rows(text)["error"], "invalid_request", argv)
+            self.assertTrue(self.rows(text)["detail"], argv)
+
+    def test_summary_suppresses_the_per_message_rows(self):
+        payload = json.dumps([{"subject": "a", "content": "b"}])
+        code, text = self.run_mail([], stdin=payload)
+        self.assertEqual(code, 0)
+        self.assertIn("messages", self.rows(text))
+        self.assertEqual(len(self.rows(text)["messages"]), 1)
+        code, text = self.run_mail(["--summary"], stdin=payload)
+        self.assertNotIn("lanes", self.rows(text).get("summary", {}))
+        self.assertIn("lanes", self.rows(text))
 
 
 if __name__ == "__main__":

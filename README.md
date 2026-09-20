@@ -94,7 +94,7 @@ Jev is a cloud API, so this is spelled out rather than implied:
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
-- **Mailbox sorting** (`jev mail`): the subject and up to 2,500 characters of the body, redacted, plus the sender's **domain** and a local class (automated / list / person), whether the mail carries an unsubscribe header, and whether you have replied in the thread. The mailbox address itself is never sent, and a message that looks like it holds a secret is not sent at all.
+- **Mailbox sorting** (`jev mail`): the subject and up to 2,500 characters of the body, redacted; the sender's **domain** (never the mailbox); a local class (automated / list / person); the message's timestamp, and only the timestamp — a `Received:` header is reduced to the date it carries, because the rest of it is the recipient's address and the internal IP of every hop; whether the mail carries a real `List-Unsubscribe` header, and separately whether the body merely mentions unsubscribing; and whether you have replied in the thread. Mail is **decoded before it is screened** — quoted-printable, percent-encoding, HTML entities and base64 runs — because a newsletter footer carries your own address percent-encoded in the unsubscribe link and base64'd in the tracking link, and a plain-text redactor sees neither. Query strings are stripped from URLs for the same reason. A message that looks like it holds a secret is not sent at all, and the check runs on the decoded text, so a base64 MIME body cannot carry a key past it. What redaction does **not** remove: a person's display name (`Jane Vale <[email]>`) is sent as written.
 - **Computer and browser use**: the goal, short element labels, and your action descriptions. Never screenshots, page text or field values. A goal or label that looks sensitive is refused before sending.
 
 Logs hold decisions only (tier, model, confidence, latency). Never prompt text.
@@ -140,4 +140,8 @@ python3 -m unittest discover -s tests
 
 ## License
 
-MIT. Jev and TypeSafe are products of TypeSafe AI; this project is independent. The optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled. The mailbox lanes in `jevkit/mailbox.py` are ported from [fazlerocks/jevmail](https://github.com/fazlerocks/jevmail) (MIT, Copyright (c) 2026 Fazle Rahman).
+MIT ([LICENSE](LICENSE)). Work ported or borrowed from other MIT projects is listed in [NOTICE](NOTICE), with their copyright notices: [fazlerocks/jevmail](https://github.com/fazlerocks/jevmail) (the mailbox lanes), [savka777/jev-use](https://github.com/savka777/jev-use) (plan-once) and [rohanarun/computer-use-cache](https://github.com/rohanarun/computer-use-cache) (two cache ideas). The optional browser runner wraps [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (MIT), which is not bundled.
+
+Jev and TypeSafe are products of TypeSafe AI; this project is independent.
+
+Contributions are welcome and keep their author in the git history. People whose work is in a release are named in [CHANGELOG.md](CHANGELOG.md).

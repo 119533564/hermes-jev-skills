@@ -1,7 +1,7 @@
 ---
 name: jev-setup
-description: Use when Jev is not working yet, a Jev tool reports no_key or auth_failed, or the person asks to connect or fix Jev. Gets the TypeSafe API key into the secret store without the agent ever seeing it.
-version: 0.1.0
+description: Use when Jev is not working yet, a Jev tool reports no_key or auth_failed, or the person asks to connect or fix Jev. Gets their TypeSafe or OpenRouter key into the secret store, unseen by you.
+version: 0.2.0
 license: MIT
 metadata:
   hermes:
@@ -11,6 +11,13 @@ metadata:
 # Connect Jev (the key never passes through you)
 
 Jev is TypeSafe's decision model. It needs one API key. **You must never see, ask for, or handle that key.**
+
+The key can come from either of two places, and the same Jev answers either way:
+
+- **TypeSafe** (`jev setup-key`, the default): a key from [console.typesafe.ai](https://console.typesafe.ai/settings/keys).
+- **OpenRouter** (`jev setup-key --provider openrouter`): reaches Jev through OpenRouter's Decisions API. Worth offering when the person already has an OpenRouter key, because it is then one key instead of two and one bill instead of two.
+
+If both keys exist, TypeSafe is used: an existing install never starts routing its decisions somewhere else because an OpenRouter key happened to be in the environment for a text model. `jev doctor` reports which one is in use under `key.provider`.
 
 ## Rules
 
@@ -29,7 +36,7 @@ Jev is TypeSafe's decision model. It needs one API key. **You must never see, as
 
    It opens a page in the browser on the computer you are running on and prints one JSON line on stderr with a `url`. The URL holds no secret.
 3. Tell the person, in one sentence, to paste their TypeSafe key into the page that just opened. If `browser_opened` is false, or they are talking to you from another device (Telegram, phone), send them the `url` and tell them it only opens **on the computer the agent runs on**. If they have no key yet, they create one at https://console.typesafe.ai/settings/keys.
-4. Wait for the command to finish. It prints `{"status": "stored", "verified": true, ...}` when the key was saved and TypeSafe accepted it. `rejected` means the key was wrong: run it again. `timed_out` means nobody used the page within ten minutes.
+4. Wait for the command to finish. It prints `{"status": "stored", "verified": true, ...}` when the key was saved and the provider accepted it. `rejected` means the key was wrong: run it again. `timed_out` means nobody used the page within ten minutes.
 5. Run `jev doctor` once more and report the result in a sentence.
 
 ## When there is no browser

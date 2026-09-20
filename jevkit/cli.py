@@ -39,7 +39,8 @@ def _skill_roots(extra: List[str]) -> List[Path]:
 
 def cmd_setup_key(args: argparse.Namespace) -> int:
     hermes_home = Path(args.hermes_home).expanduser() if args.hermes_home else None
-    common = {"verify": not args.no_verify, "hermes": not args.no_hermes, "hermes_home": hermes_home}
+    common = {"verify": not args.no_verify, "hermes": not args.no_hermes, "hermes_home": hermes_home,
+              "provider": args.provider}
     if args.tty:
         result = key_setup.run_tty(**common)
     else:
@@ -269,21 +270,75 @@ def cmd_triage(args: argparse.Namespace) -> int:
     return _out({"summary": triage.summarize(rows), "messages": rows})
 
 
+_MAIL_SHAPES = ('the input must be a JSON list of messages, an object with "messages": [...], '
+                'or an object with "items": [...]')
+
+
+def _mail_input(args: argparse.Namespace) -> Any:
+    """Read the JSON, turning every way it can be unreadable into a ValueError.
+
+    `jev ask` promises {"error": "invalid_request", ...} and exit 2 for bad input; this
+    command answered a missing file, a directory, non-UTF-8 bytes, invalid JSON and a
+    bare JSON scalar with a raw Python traceback on stderr and nothing on stdout.
+    """
+    if not args.file:
+        return _stdin_json()
+    try:
+        text = Path(args.file).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("--file is not UTF-8 text") from None
+    except OSError as error:
+        raise ValueError(f"--file could not be read: {error}") from None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--file is not valid JSON: {error}") from None
+    except RecursionError:
+        raise ValueError("--file is nested too deeply to read") from None
+
+
+def _mail_messages(raw: Any) -> List[Any]:
+    """One reader for --file and for stdin.
+
+    They disagreed. `{"items": [...]}` was honoured from a file and, piped in, became a
+    single empty message: the summary reported a mailbox of one, exit 0, and nothing said
+    three messages had been dropped. A mailbox tool that reports fewer messages than it
+    was handed and succeeds is the one failure a caller cannot notice.
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("messages", "items"):
+            if isinstance(raw.get(key), list):
+                return raw[key]
+    raise ValueError(_MAIL_SHAPES)
+
+
 def cmd_mail(args: argparse.Namespace) -> int:
     """Sort a mailbox into lanes: which mail is even addressed to me as a person."""
-    if args.file:
-        raw = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        messages = raw if isinstance(raw, list) else raw.get("messages") or raw.get("items") or []
-    else:
-        raw = _stdin_json()
-        messages = raw if isinstance(raw, list) else raw.get("messages") or [raw]
-    messages = [m for m in messages if isinstance(m, dict)]
+    try:
+        # urllib hands the timeout to the socket, which answers nan with ValueError and
+        # inf with OverflowError — neither of which classify's fail-open path knew about.
+        # cmd_ask has carried this guard since the day the flag was added.
+        if not args.timeout <= 3600:
+            raise ValueError("--timeout must be a number of seconds, at most 3600")
+        entries = _mail_messages(_mail_input(args))
+    except ValueError as error:
+        _out({"error": "invalid_request", "detail": str(error)})
+        return 2
+    messages = [m for m in entries if isinstance(m, dict)]
+    dropped = len(entries) - len(messages)
     if not messages:
         raise SystemExit("no messages to sort")
     rows = mailbox.classify_many(messages, workers=args.workers, timeout=args.timeout)
+    summary = mailbox.summarize(rows)
+    if dropped:
+        # An exporter row that is not an object used to vanish completely: not in the
+        # rows, not in not_sent_to_jev, and the summary reported the smaller number.
+        summary["dropped_not_an_object"] = dropped
     if args.summary:
-        return _out(mailbox.summarize(rows))
-    return _out({"summary": mailbox.summarize(rows), "messages": rows})
+        return _out(summary)
+    return _out({"summary": summary, "messages": rows})
 
 
 def cmd_spend(args: argparse.Namespace) -> int:
@@ -488,7 +543,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("setup-key", help="open a private page for the person to paste their TypeSafe key")
+    p = sub.add_parser("setup-key", help="open a private page for the person to paste their Jev key")
+    p.add_argument("--provider", choices=list(keystore.PROVIDERS), default="typesafe",
+                   help="typesafe (default) is a key from console.typesafe.ai; openrouter reaches the same Jev "
+                        "through OpenRouter, which is one key instead of two if you already use it")
     p.add_argument("--tty", action="store_true", help="hidden terminal prompt instead of a browser page")
     p.add_argument("--host", default="127.0.0.1", help="bind address; keep loopback unless you are on a private network")
     p.add_argument("--port", type=int, default=0)
@@ -557,9 +615,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_triage)
 
     p = sub.add_parser("mail", help="sort a mailbox into lanes: needs reply / updates / promotional / sales / spam")
-    p.add_argument("--file", help="JSON list of messages (subject, content/snippet, sender, headers); else read stdin")
-    p.add_argument("--workers", type=int, default=8)
-    p.add_argument("--timeout", type=float, default=6.0)
+    p.add_argument("--file", help='JSON list of messages (subject, content/snippet, sender, headers), '
+                                  'or {"messages": [...]} or {"items": [...]}; else the same on stdin')
+    p.add_argument("--workers", type=int, default=8, help="messages sorted side by side")
+    p.add_argument("--timeout", type=float, default=6.0, help="seconds per message, at most 3600")
     p.add_argument("--summary", action="store_true", help="counts only, no per-message rows")
     p.set_defaults(func=cmd_mail)
 

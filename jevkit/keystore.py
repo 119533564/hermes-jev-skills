@@ -23,6 +23,14 @@ KEYCHAIN_SERVICE = "Hermes TypeSafe API"
 KEYCHAIN_ACCOUNT = ENV_VAR
 _SECURITY = "/usr/bin/security"
 
+# Jev can also be reached through OpenRouter, which is one key instead of two for anyone
+# already using OpenRouter for their models. Same request, same answers: only the URL and
+# the model id differ (see client.OPENROUTER_ENDPOINT). Contributed as
+# github.com/kerpopule/hermes-jev-skills/pull/1 by Lorenzo DZ (@Barba2k2).
+PROVIDERS = ("typesafe", "openrouter")
+_ENV = {"typesafe": ENV_VAR, "openrouter": "OPENROUTER_API_KEY"}
+_SERVICE = {"typesafe": KEYCHAIN_SERVICE, "openrouter": "Hermes OpenRouter API"}
+
 
 def credentials_file() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
@@ -37,11 +45,11 @@ def looks_like_key(value: str) -> bool:
 
 # ── read ─────────────────────────────────────────────────────────────────────
 
-def _from_keychain() -> Optional[str]:
+def _from_keychain(provider: str = "typesafe") -> Optional[str]:
     if sys.platform == "darwin" and os.path.exists(_SECURITY):
-        cmd = [_SECURITY, "find-generic-password", "-w", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT]
+        cmd = [_SECURITY, "find-generic-password", "-w", "-s", _SERVICE[provider], "-a", _ENV[provider]]
     elif shutil.which("secret-tool"):
-        cmd = ["secret-tool", "lookup", "service", KEYCHAIN_SERVICE, "account", KEYCHAIN_ACCOUNT]
+        cmd = ["secret-tool", "lookup", "service", _SERVICE[provider], "account", _ENV[provider]]
     else:
         return None
     try:
@@ -52,34 +60,66 @@ def _from_keychain() -> Optional[str]:
     return value if proc.returncode == 0 and value else None
 
 
-def _from_file() -> Optional[str]:
-    path = credentials_file()
+def _from_file(provider: str = "typesafe") -> Optional[str]:
+    path = credentials_file() if provider == "typesafe" else credentials_file().with_name("credentials-openrouter")
+    variable = _ENV.get(provider, ENV_VAR)
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith(ENV_VAR + "="):
+            if line.startswith(variable + "="):
                 return line.split("=", 1)[1].strip() or None
     except OSError:
         return None
     return None
 
 
-def resolve() -> Optional[str]:
-    return (os.environ.get(ENV_VAR) or "").strip() or _from_keychain() or _from_file()
+def _for(provider: str) -> Optional[str]:
+    if provider == "typesafe":
+        return (os.environ.get(ENV_VAR) or "").strip() or _from_keychain() or _from_file()
+    env = (os.environ.get(_ENV[provider]) or "").strip()
+    return env or _from_keychain(provider) or _from_file(provider)
 
 
-def source() -> str:
-    if (os.environ.get(ENV_VAR) or "").strip():
+def provider() -> str:
+    """Which provider this machine can actually reach Jev through.
+
+    TypeSafe first, always: an existing install must not start routing its decisions
+    somewhere else because an OpenRouter key happens to be in the environment for a text
+    model. OpenRouter is the fallback, not a preference.
+    """
+    for name in PROVIDERS:
+        if _for(name):
+            return name
+    return "absent"
+
+
+def resolve(for_provider: Optional[str] = None) -> Optional[str]:
+    """The key. With no argument, the key for whichever provider this machine has."""
+    if for_provider:
+        if for_provider not in PROVIDERS:
+            return None
+        return _for(for_provider)
+    name = provider()
+    return _for(name) if name != "absent" else None
+
+
+def source(for_provider: Optional[str] = None) -> str:
+    name = for_provider or provider()
+    if name not in PROVIDERS:
+        return "absent"
+    if (os.environ.get(_ENV[name]) or "").strip():
         return "environment"
-    if _from_keychain():
+    if _from_keychain(name):
         return "os-secret-store"
-    if _from_file():
+    if _from_file(name):
         return "credentials-file"
     return "absent"
 
 
 def describe() -> Dict[str, object]:
+    name = provider()
     key = resolve()
-    return {"present": bool(key), "source": source(), "length": len(key) if key else 0}
+    return {"present": bool(key), "provider": name, "source": source(),
+            "length": len(key) if key else 0}
 
 
 # ── write ────────────────────────────────────────────────────────────────────
@@ -95,16 +135,16 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(temp, path)
 
 
-def upsert_env_file(path: Path, value: str) -> None:
-    """Set ENV_VAR in a dotenv file, leaving every other line untouched."""
+def upsert_env_file(path: Path, value: str, variable: str = ENV_VAR) -> None:
+    """Set one variable in a dotenv file, leaving every other line untouched."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
-    entry = f"{ENV_VAR}={value}"
+    entry = f"{variable}={value}"
     replaced = False
     for index, line in enumerate(lines):
-        if line.startswith(ENV_VAR + "="):
+        if line.startswith(variable + "="):
             lines[index] = entry
             replaced = True
     if not replaced:
@@ -112,15 +152,15 @@ def upsert_env_file(path: Path, value: str) -> None:
     _write_private(path, "\n".join(lines) + "\n")
 
 
-def _store_keychain(value: str) -> bool:
+def _store_keychain(value: str, provider: str = "typesafe") -> bool:
     if sys.platform == "darwin" and os.path.exists(_SECURITY):
         # `security` has no stdin mode for the secret, so it is briefly an argv entry
         # of a child we own. The alternative (no secret store at all) is worse.
-        cmd = [_SECURITY, "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w", value]
+        cmd = [_SECURITY, "add-generic-password", "-U", "-s", _SERVICE[provider], "-a", _ENV[provider], "-w", value]
         stdin = None
     elif shutil.which("secret-tool"):
-        cmd = ["secret-tool", "store", "--label", KEYCHAIN_SERVICE, "service", KEYCHAIN_SERVICE,
-               "account", KEYCHAIN_ACCOUNT]
+        cmd = ["secret-tool", "store", "--label", _SERVICE[provider], "service", _SERVICE[provider],
+               "account", _ENV[provider]]
         stdin = value
     else:
         return False
@@ -143,20 +183,28 @@ def hermes_env_files(hermes_home: Optional[Path] = None) -> List[Path]:
     return files
 
 
-def store(value: str, hermes: bool = True, hermes_home: Optional[Path] = None) -> Dict[str, object]:
+def store(value: str, hermes: bool = True, hermes_home: Optional[Path] = None,
+          provider: str = "typesafe") -> Dict[str, object]:
     """Persist the key. Returns where it went, never the key itself."""
     value = value.strip()
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown provider: choose one of {', '.join(PROVIDERS)}")
     if not looks_like_key(value):
         raise ValueError("that does not look like an API key")
     written: List[str] = []
-    if _store_keychain(value):
+    if _store_keychain(value, provider):
         written.append("os-secret-store")
-    else:
+    elif provider == "typesafe":
         upsert_env_file(credentials_file(), value)
         written.append(str(credentials_file()))
+    else:
+        # A 0600 file next to the TypeSafe one, under this provider's own variable name.
+        path = credentials_file().with_name("credentials-openrouter")
+        upsert_env_file(path, value, _ENV[provider])
+        written.append(str(path))
     lanes = 0
     if hermes:
         for env_file in hermes_env_files(hermes_home):
-            upsert_env_file(env_file, value)
+            upsert_env_file(env_file, value, _ENV[provider])
             lanes += 1
-    return {"stored_in": written, "hermes_env_files": lanes, "length": len(value)}
+    return {"stored_in": written, "hermes_env_files": lanes, "provider": provider, "length": len(value)}

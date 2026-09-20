@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.16.0 (2026-09-20)
+
+**Jev through OpenRouter, so it can be one key instead of two**
+
+- `jev setup-key --provider openrouter` stores an OpenRouter key, and Jev is then reached
+  through OpenRouter's Decisions API (`~typesafe/jev-latest`). Same request, same answers,
+  same model: only the URL and the model id differ. Measured side by side on one decision:
+  OpenRouter 433 ms, TypeSafe direct 569 ms, same choice, confidence 0.37 against 0.33.
+- **If both keys are present, TypeSafe is used.** Most machines running this already have
+  `OPENROUTER_API_KEY` in the environment for a text model, and finding one must not
+  silently reroute decisions that were going to TypeSafe. `jev doctor` reports which
+  provider is in use under `key.provider`.
+- **The idea, and the first implementation, are
+  [Lorenzo DZ](https://github.com/Barba2k2)'s**, contributed as
+  [PR #1](https://github.com/kerpopule/hermes-jev-skills/pull/1). The mechanism changed:
+  that version prompted a chat model for JSON through `/chat/completions`, which returns an
+  LLM's guess wearing a confidence number it made up. Every threshold in this repo — the
+  0.65 action floor, the 0.7 drop floor, "unsure is not hard" — reads a calibrated
+  probability, so an imitation would have quietly broken all of them. OpenRouter serves the
+  real Jev, so the feature works as asked without that trade.
+- A key that cannot be stored no longer closes the browser connection with no response. It
+  was reachable through a plain bug in the storing code, and the person is sitting there
+  with a key in the clipboard.
+
+**Licensing**
+
+- Added [NOTICE](NOTICE). The repo is MIT, and it carries ported work from three MIT
+  projects; jevmail's permission notice in particular has to travel with the portion of it
+  that was copied, not just a link. README's licence section now points there, and says
+  contributions keep their author in the git history.
+
+
 ## 0.15.1 (2026-09-20)
 
 - **`scripts/demo_home.py` builds the home the README screenshot should come from**: five
@@ -34,26 +66,37 @@ A mailbox sorter, ported from someone else's app and changed where our own numbe
   store, and nothing here needs Node, Vercel or a browser.
 - **Kept because they earn their place.** The five lanes, because "needs reply" versus
   "promotional" is the split that decides whether anyone opens the thing. Two free signals
-  in the state: whether the mail carries an unsubscribe header, and whether the recipient
-  has already replied in the thread — a thread we started is never cold outreach. Per-answer
-  probabilities kept next to the verdict, so a correction can be read against what Jev said.
+  in the state: whether the mail carries a real `List-Unsubscribe` header, and whether the
+  recipient has already replied in the thread. Both are *sent to Jev*; no rule here reads
+  them back, so neither moves the answer by itself. Per-answer probabilities kept next to
+  the verdict, so a correction can be read against what Jev said.
 - **Changed because our measurements said so.** jevmail stores urgency as
   `round(score) + 1`. On a live bank alert Jev answered with a *flat* urgency distribution,
   confidence 0.0, point estimate 2.73 — which that formula stores as 4 of 5, a level nobody
   chose. Here the mass at "today" and "blocked" is what a caller acts on, the point estimate
   is reported as what it is, and a spread within 0.15 of the runner-up is marked unsure.
-- **The address is never sent.** Not the mailbox, not the local part. The domain and a
-  locally-derived `sender_class` (automated / list / person) carry what the lane question
-  needs; a message that looks like it holds a secret is not sent at all and is flagged for a
-  person instead. Fail-open means a person looks, never that mail disappears: a Jev failure,
-  a secret, or an answer outside the lane set all set `needs_attention` true and say why.
+- **The address is not sent, in any encoding it could have arrived in.** Not the mailbox,
+  not the local part — and not the percent-encoded copy in an unsubscribe link, the
+  base64'd copy in a tracking link, or a quoted-printable `=40`. Mail is decoded before it
+  is screened, and URL query strings are dropped. The domain and a locally-derived
+  `sender_class` (automated / list / person) carry what the lane question needs; a message
+  that looks like it holds a secret is not sent at all — that check reads the decoded text
+  too — and is flagged for a person instead. Fail-open means a person looks, never that
+  mail disappears: a Jev failure, a transport that crashes, a secret, a message with
+  nothing to read, an unsure answer in any lane, or an answer outside the lane set all set
+  `needs_attention` true and say why.
 - **Measured.** 11 real-shaped messages end to end: 435 ms p50, 562 ms p90, $0.00021
   estimated for the batch, and the lane matched the hand label on all 11 — including a
   phishing mail read as spam, a colleague asking for a total read as needs_reply, and the
   credential one, which was never sent.
-- Tested offline: 13 cases in `tests/test_mailbox.py`, every Jev reply faked, including the
-  two failure directions — a human's mail filed under promotional, and a newsletter that
-  wakes someone up.
+- **Measured** is the module's own estimate, not a meter reading: `cost_estimate_usd` is
+  `rows x 450 tokens x $0.042/M`, and `reply["usage"]` is not read.
+- Tested offline: 47 cases in `tests/test_mailbox.py`, every Jev reply faked **and the
+  credential lookup patched out** — `client.ask` resolves the key before it consults the
+  transport, so the first version of this file read the developer's real Keychain and was
+  red on any machine without one. Covered: the two failure directions (a human's mail
+  filed under promotional, a newsletter that wakes someone up), every encoding that used
+  to carry the address past redaction, `classify_many`, and `jev mail` itself.
 
 ## 0.14.0 (2026-09-20)
 

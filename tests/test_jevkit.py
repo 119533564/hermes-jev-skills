@@ -177,8 +177,8 @@ class KeySetupTests(unittest.TestCase):
     def test_page_stores_key_and_output_never_contains_it(self):
         stored = {}
 
-        def fake_store(value, hermes=True, hermes_home=None):
-            stored["value"] = value
+        def fake_store(value, hermes=True, hermes_home=None, provider="typesafe"):
+            stored["value"], stored["provider"] = value, provider
             return {"stored_in": ["test"], "hermes_env_files": 0, "length": len(value)}
 
         patcher = mock.patch.object(keystore, "store", fake_store)
@@ -196,6 +196,7 @@ class KeySetupTests(unittest.TestCase):
         thread.join(30)
 
         self.assertEqual(stored["value"], KEY)
+        self.assertEqual(stored["provider"], "typesafe")
         self.assertEqual(self.box["result"]["status"], "stored")
         self.assertNotIn(KEY, json.dumps(self.box["result"]) + "".join(self.announced) + done)
 
@@ -495,6 +496,83 @@ class ChooseTests(unittest.TestCase):
             choose.choose(action_request(goal="type the password hunter2 into the field"))
         with self.assertRaises(ValueError):
             choose.choose(action_request(extra="x"))
+
+
+class OpenRouterProviderTests(unittest.TestCase):
+    """Jev through OpenRouter: one key instead of two.
+
+    The idea, and the first version of this, came from Lorenzo DZ (@Barba2k2) as PR #1.
+    That version prompted a chat model for JSON, which returns an LLM's guess wearing a
+    made-up confidence; these tests pin the thing that makes the feature worth having,
+    which is that the SAME Jev answers the SAME request, only through a different door.
+    """
+
+    def setUp(self):
+        for name in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_MODEL"):
+            patcher = mock.patch.dict(os.environ, {}, clear=False)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            os.environ.pop(name, None)
+        blind = mock.patch.object(keystore, "_from_keychain", lambda provider="typesafe": None)
+        blind.start()
+        self.addCleanup(blind.stop)
+        nofile = mock.patch.object(keystore, "_from_file", lambda provider="typesafe": None)
+        nofile.start()
+        self.addCleanup(nofile.stop)
+
+    def sent(self, **env):
+        seen = {}
+
+        def transport(body, headers, timeout):
+            seen.update(body=json.loads(body), headers=dict(headers))
+            return json.dumps({"answers": {"ok": {"type": "noul", "noul": 0.9}},
+                               "usage": {"input_tokens": 3}}).encode()
+        with mock.patch.dict(os.environ, env):
+            client.ask({"x": 1}, {"ok": client.noul("fine?")}, transport=transport)
+        return seen
+
+    def test_an_openrouter_key_sends_the_same_request_to_the_decisions_api(self):
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-" + "b" * 40}):
+            self.assertEqual(keystore.provider(), "openrouter")
+        seen = self.sent(OPENROUTER_API_KEY="sk-or-v1-" + "b" * 40)
+        self.assertEqual(seen["body"]["model"], client.OPENROUTER_MODEL)
+        self.assertEqual(sorted(seen["body"]), ["model", "questions", "state"])   # same shape
+        self.assertEqual(seen["headers"]["X-Title"], "Hermes Jev Skills")
+
+    def test_a_typesafe_key_is_preferred_so_an_existing_install_never_moves(self):
+        """An OpenRouter key is in the environment for the text model on most of these
+        machines. Finding one must not reroute decisions that were going to TypeSafe."""
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "ts-" + "c" * 30,
+                                          "OPENROUTER_API_KEY": "sk-or-v1-" + "b" * 40}):
+            self.assertEqual(keystore.provider(), "typesafe")
+        seen = self.sent(TYPESAFE_API_KEY="ts-" + "c" * 30, OPENROUTER_API_KEY="sk-or-v1-" + "b" * 40)
+        self.assertEqual(seen["body"]["model"], client.DEFAULT_MODEL)
+        self.assertNotIn("X-Title", seen["headers"])
+
+    def test_the_openrouter_url_is_the_decisions_api_not_chat_completions(self):
+        """A chat model asked for JSON is not Jev: no calibration, invented confidence."""
+        self.assertIn("/api/alpha/decisions", client.OPENROUTER_ENDPOINT)
+        self.assertNotIn("chat/completions", client.OPENROUTER_ENDPOINT)
+        self.assertTrue(client.OPENROUTER_MODEL.endswith("typesafe/jev-latest"))
+
+    def test_no_key_anywhere_still_says_run_setup_key(self):
+        """The module patches keystore.resolve to a fake key; this one test unpatches it."""
+        def never(*args, **kwargs):
+            raise AssertionError("a request was built with no key")
+        with mock.patch.object(keystore, "resolve", lambda *a, **k: None):
+            with self.assertRaises(client.JevError) as caught:
+                client.ask({"x": 1}, {"ok": client.noul("fine?")}, transport=never)
+        self.assertEqual(caught.exception.code, "no_key")
+
+    def test_an_unknown_provider_name_falls_back_to_typesafe_rather_than_failing(self):
+        seen = {}
+
+        def transport(body, headers, timeout):
+            seen["body"] = json.loads(body)
+            return json.dumps({"answers": {"ok": {"type": "noul", "noul": 0.5}}, "usage": {}}).encode()
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "ts-" + "c" * 30}):
+            client.ask({"x": 1}, {"ok": client.noul("fine?")}, provider="nonsense", transport=transport)
+        self.assertEqual(seen["body"]["model"], client.DEFAULT_MODEL)
 
 
 if __name__ == "__main__":
