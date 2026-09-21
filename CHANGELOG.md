@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.19.0 (2026-09-21)
+
+A search run as a loop, with Jev taking the three decisions and nothing else.
+
+**`jev search` — which results to open, whether that is enough, and which query next**
+
+- A research turn is one piece of writing and three decisions, and the decision agents get
+  wrong is the last one: they stop when a result looks plausible, not when the question is
+  answered. `jev search` takes a question, the results you already fetched, and up to five
+  candidate queries **you** wrote, and returns `decision` — `answer`, `search_more`,
+  `propose_queries`, `answer_from_what_we_have` or `unknown`.
+- Jev never writes a query. It picks one of yours or declines (`none` is always an option,
+  so a closed set cannot force a bad pick). The writing stays with the model that is good
+  at it.
+- Every result's title, URL and snippet goes through the same local, no-network screen the
+  memory filter uses before anything is sent — with the URL *inside* the screened text on
+  purpose, because a link shaped to carry data off the machine is the one thing a search
+  result can do that a memory passage cannot. `screening` says which check a result got,
+  and `dropped_injection_ids` is never to be read.
+- Measured live against the TypeSafe endpoint, six-result rounds: 1.54 s, 1.92 s, 2.26 s,
+  2.36 s, 1.55 s wall clock, two requests per round (rank, then sufficiency and the pick).
+- Ships as `jev search`, the `jev_search` Hermes tool, `skills/jev-search/SKILL.md`, and
+  [docs/search-loop.md](docs/search-loop.md). 24 offline tests; the failure modes are fakes,
+  not reproductions of an outage.
+
+**Two defects the first live rounds found, both now tests**
+
+- **Everything irrelevant answered `unknown`.** Six Wikipedia results, every relevance
+  score under 0.5, gave an empty shortlist and `decision: unknown` — the value that means
+  "Jev was not consulted" — about a round where Jev had read all six. An agent following
+  the skill would carry on alone; the honest answer was `search_more`. Jev now says
+  `sufficient: false` on that path and the note says what happened.
+- **The empty shortlist was the one case that got no recommendation.** The next-query pick
+  only ran when there were passages to send, so "none of these results are relevant, run a
+  different query" — the case where a recommendation is worth most — was the case that got
+  none. The pick is now asked on that path too, with an empty shortlist and a state saying
+  so.
+
 ## 0.18.0 (2026-09-20)
 
 Three things that were shipped but not performing: measured, then fixed.

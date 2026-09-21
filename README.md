@@ -15,6 +15,7 @@ That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model
 | Skill | What Jev decides | Measured |
 |---|---|---|
 | **Model routing** | Which model is good enough for this turn, from every model you can call | ~0.4 s per turn |
+| **Search** | Which of the results you fetched are worth opening, whether the evidence answers the question, and which of your candidate queries to run next. Jev never writes a query | ~1.9 s per round (median of five live runs, two requests: rank, then sufficiency and the pick) |
 | **Memory** | Which retrieved passages are worth reading, and which contain hidden instructions | 60 passages per request, up to 480 per call; an injection screen runs locally even when Jev is down |
 | **Handoffs** | Nothing, by default. We measured it: a handoff written from Jev's keep / summarize / drop digest recalled less than one written from the plain transcript. What ships is the whole dialogue, 1,200 words and a way back to the old session | 58.7% recall alone, 75.0% with one search, against 37.5% and 68.3% before ([scorecard](evals/compaction/results/SCORECARD-2026-09-20.md)) |
 | **Choosing turns** | Which turns to keep when a transcript must be cut to a fixed size | 71 turns in 0.95 s; beat choosing by recency 11 questions to 4 |
@@ -24,7 +25,7 @@ That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model
 | **Computer use** | The next GUI action, from a table of actions you already judged safe. `--plan` splits a multi-step command once, up front | ~0.5 s per decision |
 | **Browser use** | The next page action, same contract | ~0.4 s per step |
 
-Eight skills ship as plain `SKILL.md` files, so they are not Hermes-only. The same folder works in Claude Code, Codex, or anything that reads a skill file.
+Nine skills ship as plain `SKILL.md` files, so they are not Hermes-only. The same folder works in Claude Code, Codex, or anything that reads a skill file.
 
 ```bash
 jev mail --file inbox.json             # sort a mailbox into lanes
@@ -94,6 +95,7 @@ Jev is a cloud API, so this is spelled out rather than implied:
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
+- **Search** (`jev search`): the date, the question, the queries already tried, and up to 900 characters of each shortlisted result (title, URL, snippet), redacted. Result ids stay local: Jev sees `P0`, `P1`… A result that looks like a credential is not sent, and neither is one carrying hidden instructions. A question that looks sensitive is not sent at all.
 - **Mailbox sorting** (`jev mail`): the subject and up to 2,500 characters of the body, redacted; the sender's **domain** (never the mailbox); a local class read off the address alone (**automated** for a mailbox that cannot receive a reply, **role** for a shared one a team reads, **list**, or **person**); the message's timestamp, and only the timestamp — a `Received:` header is reduced to the date it carries, because the rest of it is the recipient's address and the internal IP of every hop; whether the mail carries a real `List-Unsubscribe` header, and separately whether the body merely mentions unsubscribing; and whether you have replied in the thread. Mail is **decoded before it is screened** — quoted-printable, percent-encoding, HTML entities and base64 runs — because a newsletter footer carries your own address percent-encoded in the unsubscribe link and base64'd in the tracking link, and a plain-text redactor sees neither. Query strings are stripped from URLs for the same reason. A message that looks like it holds a secret is not sent at all, and the check runs on the decoded text, so a base64 MIME body cannot carry a key past it. What redaction does **not** remove: a person's display name (`Jane Vale <[email]>`) is sent as written. The body is also screened for text aimed at an agent; a hit is **flagged** on the result and never filed away, because one sentence in a body would otherwise be the most useful thing an attacker could reach here.
 - **Computer and browser use**: the goal, short element labels, and your action descriptions. Never screenshots, page text or field values. A goal or label that looks sensitive is refused before sending.
 
@@ -103,7 +105,7 @@ One thing to be plain about: in the default `redacted-text` mode, routing sends 
 
 ## Everything fails open
 
-No key, timeout, rate limit, malformed reply, low confidence: routing keeps your current model, memory returns the original list, compaction drops nothing, skill selection suggests nothing, and computer use returns `reobserve`. A Jev outage costs you at most the time budget (2.5 s for routing) and never blocks a turn.
+No key, timeout, rate limit, malformed reply, low confidence: routing keeps your current model, memory returns the original list, compaction drops nothing, skill selection suggests nothing, search returns the screened head of your list with the decision marked `unknown`, and computer use returns `reobserve`. A Jev outage costs you at most the time budget (2.5 s for routing) and never blocks a turn.
 
 Safety rails that do not depend on Jev being right:
 
@@ -116,7 +118,7 @@ Safety rails that do not depend on Jev being right:
 
 ```
 jevkit/            the library and the `jev` command (stdlib only)
-skills/            eight SKILL.md skills, agent-agnostic
+skills/            nine SKILL.md skills, agent-agnostic
 hermes/plugin/     the Hermes plugin
 router-dashboard/  the model routing page (`jev dashboard`)
 install.py         installer / uninstaller
@@ -130,6 +132,7 @@ docs/              integration notes and hard-won operational lessons
 |---|---|
 | [turning-a-jev-feature-on.md](docs/turning-a-jev-feature-on.md) | **Before you enable anything.** Shadow mode, silent defaults, why a quiet log proves nothing, and bounding by the clock rather than the count. |
 | [measuring-a-router.md](docs/measuring-a-router.md) | Replaying routing against your own traffic before you trust the savings. |
+| [search-loop.md](docs/search-loop.md) | Running a search as a loop: which results to open, when to stop, and how to write candidate queries so Jev can pick one. |
 | [wiring-triage-into-a-live-pipeline.md](docs/wiring-triage-into-a-live-pipeline.md) | Adding classification to something already carrying real traffic. |
 | [hermes-compaction.md](docs/hermes-compaction.md) | Handoffs on Hermes: what we measured, what ships, and the two search calls that make a handoff enough. |
 | [response-caches.md](docs/response-caches.md) | Before you put a response cache in front of an agent. Why it does little for a Jev loop, and the plan cache we built instead. |

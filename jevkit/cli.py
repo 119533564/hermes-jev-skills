@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, mailbox, memo, plan, rerank, replay, route, skillpick, spend, supervise, triage
+from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, mailbox, memo, plan, rerank, replay, route, search, skillpick, spend, supervise, triage
 
 
 def _stdin_json() -> Any:
@@ -232,6 +232,47 @@ def cmd_choose(args: argparse.Namespace) -> int:
         return _out(choose.choose(_stdin_json(), mock=args.mock))
     except ValueError as error:
         raise SystemExit(f"invalid request: {error}") from None
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    """One round of the search loop: which results to read, whether that is enough, what next.
+
+    Bad input is refused in JSON with exit 2, like `jev ask` and `jev mail`. A Jev failure
+    is not an error here: the module fails open and the reply says so.
+    """
+    try:
+        # Not _stdin_json(): it turns only a JSONDecodeError into a SystemExit on stderr,
+        # and the promise every other command makes is a JSON refusal an agent can read.
+        try:
+            raw = sys.stdin.read(2_000_000) if sys.stdin is not None else ""
+        except UnicodeDecodeError:
+            raise ValueError("stdin is not valid JSON: it is not UTF-8 text") from None
+        try:
+            request = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"stdin is not valid JSON: {error}") from None
+        except RecursionError:
+            raise ValueError("stdin is nested too deeply to read") from None
+        if not isinstance(request, dict):
+            raise ValueError('the request must be a JSON object: {"question": ..., "results": [...]}')
+        for field in ("question", "results"):
+            if request.get(field) is None:
+                raise ValueError(f'the request has no "{field}"')
+        if not isinstance(request["question"], str):
+            raise ValueError('"question" must be a string')
+        if not isinstance(request["results"], list):
+            raise ValueError('"results" must be a list of {"id", "title", "url", "snippet"} objects')
+        return _out(search.gate(
+            request["question"], request["results"],
+            queries_tried=request.get("queries_tried") or [],
+            candidate_queries=request.get("candidate_queries") or [],
+            round_index=int(request.get("round_index") or args.round),
+            max_rounds=int(request.get("max_rounds") or args.max_rounds),
+            top_k=int(request.get("top_k") or args.top_k),
+            timeout=args.timeout))
+    except ValueError as error:
+        _out({"error": "invalid_request", "detail": str(error)})
+        return 2
 
 
 def cmd_memo(args: argparse.Namespace) -> int:
@@ -718,6 +759,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("choose", help="pick the next GUI or browser action from a candidate table")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(func=cmd_choose)
+
+    p = sub.add_parser("search", help="one round of a search: which results to read, whether that is enough, which query next")
+    p.add_argument("--round", type=int, default=1, help="which round this is, 1-based")
+    p.add_argument("--max-rounds", type=int, default=3, help="rounds you are willing to run in total")
+    p.add_argument("--top-k", type=int, default=6, help="how many results to hand back to read")
+    p.add_argument("--timeout", type=float, default=6.0)
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("plan", help="break one computer-use command into steps, once, before the Jev loop starts")
     p.add_argument("command", nargs="*", help='the command; omit to read {"command": ...} from stdin')
