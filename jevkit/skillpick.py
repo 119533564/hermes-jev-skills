@@ -40,19 +40,31 @@ def _warn_once(key: Any, message: str, *args: Any) -> None:
         logger.warning(message, *args)
 
 
-# YAML's block scalar markers. A description written after one of these lives on the
-# indented lines below it, not on the key's own line.
-_BLOCK_SCALARS = frozenset((">", "|", ">-", "|-", ">+", "|+", ">2", "|2"))
+# A block scalar header: `>` or `|`, then an indentation indicator and a
+# chomping indicator in either order, then an optional comment. `>2-`, `|+2`
+# and `> # folded` are all valid headers that a fixed list of strings misses.
+_BLOCK_HEADER = re.compile(r"^[>|][0-9+-]*\s*(?:#.*)?$")
 
 
 def _front_matter(text: str) -> Dict[str, str]:
     """Read the front matter, block scalars included.
 
-    A long description is commonly written as `description: >` with the text indented
-    underneath, which is valid YAML and the only readable way to write the several
-    sentences a good description needs. Reading the key's own line and stopping gave
-    that skill the description ">", so it reached Jev with nothing to be ranked on and
-    could never be picked for anything its name did not already say.
+    A long description is commonly written as `description: >` with the text
+    indented underneath, which is valid YAML and the only readable way to write
+    the several sentences a good description needs. Reading the key's own line
+    and stopping gave that skill the description ">", so it reached Jev with
+    nothing to be ranked on and could only be picked for what its name already
+    said.
+
+    This is not a YAML parser and does not try to be. It reads the shapes a
+    front matter actually uses: a block runs until a non-blank line is less
+    indented than the block's own first line, and its lines are joined with
+    spaces. `|` is deliberately normalised to one line like `>` rather than
+    keeping its breaks, because the two are the same description to the reader
+    downstream: it is about to be truncated to a few hundred characters and put
+    in a list for a decision model. For the same reason the indentation
+    indicator is accepted but its explicit width is not honoured, and chomping
+    is not applied -- the result is stripped either way.
     """
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.S)
     fields: Dict[str, str] = {}
@@ -65,23 +77,29 @@ def _front_matter(text: str) -> Dict[str, str]:
         if not sep or key.startswith((" ", "\t")):
             index += 1
             continue
-        scalar = value.strip().strip("'\"")
-        if scalar not in _BLOCK_SCALARS:
-            fields[key.strip()] = scalar
+        header = _BLOCK_HEADER.match(value.strip())
+        if not header:
+            fields[key.strip()] = value.strip().strip("'\"")
             index += 1
             continue
-        # The block runs until the first line that is neither blank nor indented. A
-        # folded scalar (`>`) joins its lines with spaces and a literal one (`|`) with
-        # newlines, but this text is about to be truncated to a few hundred characters
-        # and shown to a decision model, so both are joined with spaces.
-        body = []
         index += 1
-        while index < len(lines) and (not lines[index].strip() or lines[index].startswith((" ", "\t"))):
-            body.append(lines[index].strip())
+        body: List[str] = []
+        indent = None
+        while index < len(lines):
+            line = lines[index]
+            if not line.strip():
+                body.append("")
+                index += 1
+                continue
+            width = len(line) - len(line.lstrip())
+            if indent is None:
+                indent = width
+            elif width < indent:
+                break
+            body.append(line[indent:])
             index += 1
-        fields[key.strip()] = " ".join(part for part in body if part)
+        fields[key.strip()] = " ".join(part for part in body if part).strip()
     return fields
-
 
 def discover(roots: Iterable[Path], disabled: Iterable[str] = ()) -> List[Dict[str, str]]:
     """Find SKILL.md files. Works for Hermes, Claude Code and Codex skill folders alike.

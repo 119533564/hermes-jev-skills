@@ -257,6 +257,40 @@ class FrontMatterTests(unittest.TestCase):
             text = (Path(tmp) / "reach" / "SKILL.md").read_text(encoding="utf-8")
         self.assertEqual(skillpick._front_matter(text).get("version"), "2.1.0")
 
+    def test_an_indent_and_chomping_indicator_together_is_still_a_block(self):
+        # YAML lets the two indicators appear in either order: `>2-` and `|+2`
+        # are both valid headers. Matching a fixed set of strings misses them,
+        # and the description becomes the header.
+        for header in (">2-", "|+2", ">-2", "|2+"):
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as tmp:
+                self._skill(tmp, "reach", f"name: reach\ndescription: {header}\n  Something useful.")
+                found = skillpick.discover([Path(tmp)])
+                self.assertEqual(found[0]["description"], "Something useful.")
+
+    def test_a_comment_after_the_header_does_not_hide_the_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: > # folded on purpose\n  Something useful.")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "Something useful.")
+
+    def test_a_literal_block_with_both_indicators_is_normalised_to_one_line(self):
+        # `|+2` is a literal block with both an indentation and a chomping
+        # indicator. It is read, and like `>` it comes back as one line: the
+        # description is about to be truncated and listed for a ranker, where
+        # the author's line breaks carry nothing the reader can use.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: |+2\n  First line.\n  Second line.")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "First line. Second line.")
+
+    def test_a_less_indented_line_ends_the_block(self):
+        # The block's indent comes from its first line; anything shallower is
+        # outside it, however malformed the file then is.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: >\n  inside the block\n wrong-indent: value\nversion: 1.0.0")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "inside the block")
+
     def test_a_plain_description_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._skill(tmp, "plain", "name: plain\ndescription: One line, as before.")
