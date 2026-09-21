@@ -220,6 +220,56 @@ class CatalogCapTests(unittest.TestCase):
         self.assertNotIn("skills_dropped", out)
 
 
+class FrontMatterTests(unittest.TestCase):
+    """A description written as a block scalar used to reach Jev as the marker itself.
+
+    `description: >` with the text indented underneath is valid YAML and the usual way
+    to write more than one line. Read as `key: value` it yields ">", so the skill was
+    ranked on its name alone.
+    """
+
+    def _skill(self, tmp, name, front):
+        folder = Path(tmp) / name
+        folder.mkdir()
+        (folder / "SKILL.md").write_text(f"---\n{front}\n---\n\n# {name}\n", encoding="utf-8")
+
+    def test_a_folded_description_is_read_not_left_as_its_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: >\n  Use when the person shares a link\n  or asks to search the web.")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "Use when the person shares a link or asks to search the web.")
+
+    def test_a_literal_description_is_read_the_same_way(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: |\n  Use when the person shares a link.\n  Also when they ask to search.")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "Use when the person shares a link. Also when they ask to search.")
+
+    def test_a_blank_line_inside_a_block_does_not_end_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: >-\n  First paragraph.\n\n  Second paragraph.\nversion: 1.0.0")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "First paragraph. Second paragraph.")
+
+    def test_a_key_after_a_block_is_still_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "reach", "name: reach\ndescription: >\n  Something useful.\nversion: 2.1.0")
+            text = (Path(tmp) / "reach" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(skillpick._front_matter(text).get("version"), "2.1.0")
+
+    def test_a_plain_description_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "plain", "name: plain\ndescription: One line, as before.")
+            found = skillpick.discover([Path(tmp)])
+        self.assertEqual(found[0]["description"], "One line, as before.")
+
+    def test_a_skill_with_only_a_marker_for_a_description_is_still_dropped(self):
+        # discover() keeps a skill only if it has a description. An empty block is not one.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._skill(tmp, "empty", "name: empty\ndescription: >")
+            self.assertEqual(skillpick.discover([Path(tmp)]), [])
+
+
 class ManyBatchesTests(unittest.TestCase):
     """A real catalog is several hundred skills, ranked as parallel batches whose answers
     are merged. The only test of pick() used three skills, which is one batch, so none of

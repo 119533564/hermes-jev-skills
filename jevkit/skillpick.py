@@ -40,14 +40,46 @@ def _warn_once(key: Any, message: str, *args: Any) -> None:
         logger.warning(message, *args)
 
 
+# YAML's block scalar markers. A description written after one of these lives on the
+# indented lines below it, not on the key's own line.
+_BLOCK_SCALARS = frozenset((">", "|", ">-", "|-", ">+", "|+", ">2", "|2"))
+
+
 def _front_matter(text: str) -> Dict[str, str]:
+    """Read the front matter, block scalars included.
+
+    A long description is commonly written as `description: >` with the text indented
+    underneath, which is valid YAML and the only readable way to write the several
+    sentences a good description needs. Reading the key's own line and stopping gave
+    that skill the description ">", so it reached Jev with nothing to be ranked on and
+    could never be picked for anything its name did not already say.
+    """
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.S)
     fields: Dict[str, str] = {}
-    if match:
-        for line in match.group(1).splitlines():
-            key, sep, value = line.partition(":")
-            if sep and not key.startswith((" ", "\t")):
-                fields[key.strip()] = value.strip().strip("'\"")
+    if not match:
+        return fields
+    lines = match.group(1).splitlines()
+    index = 0
+    while index < len(lines):
+        key, sep, value = lines[index].partition(":")
+        if not sep or key.startswith((" ", "\t")):
+            index += 1
+            continue
+        scalar = value.strip().strip("'\"")
+        if scalar not in _BLOCK_SCALARS:
+            fields[key.strip()] = scalar
+            index += 1
+            continue
+        # The block runs until the first line that is neither blank nor indented. A
+        # folded scalar (`>`) joins its lines with spaces and a literal one (`|`) with
+        # newlines, but this text is about to be truncated to a few hundred characters
+        # and shown to a decision model, so both are joined with spaces.
+        body = []
+        index += 1
+        while index < len(lines) and (not lines[index].strip() or lines[index].startswith((" ", "\t"))):
+            body.append(lines[index].strip())
+            index += 1
+        fields[key.strip()] = " ".join(part for part in body if part)
     return fields
 
 
